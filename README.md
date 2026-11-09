@@ -30,6 +30,16 @@ Everything is at **[kb.curltale.com](https://kb.curltale.com)**. Good places to 
 | Fix a problem | [Troubleshooting](https://kb.curltale.com/help/troubleshooting/) |
 | Understand it as a decision maker | [Curltale AI in plain words](https://kb.curltale.com/business/) |
 
+## Ask the docs from your agent
+
+The documentation also runs on Curltale AI itself, as a public, read-only MCP server: no data, nothing to sign up for. Connect your agent and ask it how to install, model and run Curltale:
+
+```sh
+claude mcp add --transport http curltale-docs https://mcp.curltale.com/mcp --header "Authorization: Bearer <public-token>"
+```
+
+The public token and a ready prompt for your agent are on [Ask the Curltale docs from your agent](https://kb.curltale.com/agents/docs-mcp/).
+
 ## Quick start
 
 You need Docker with Compose v2 and about 2 GB of memory for the app (the embedding model runs inside it). An AI endpoint (an OpenRouter key, or any OpenAI-compatible server) is optional, but Alfred and most of the library's writing and checking need it.
