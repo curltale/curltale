@@ -1,0 +1,54 @@
+# Optional example: demo databases for trying the connectors (the same synthetic data in PostgreSQL, MariaDB and ClickHouse). Internal network only.
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d      (or copy these services into your docker-compose.yml)
+# then load them from the app container: python -m studio.synth.export ... (see README "Demo databases").
+services:
+  sampledb:
+    image: postgres:16.10
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sampledb
+      POSTGRES_USER: sampleowner
+      POSTGRES_PASSWORD: ${SAMPLEDB_PASSWORD:?set SAMPLEDB_PASSWORD in .env}
+    volumes:
+      - sampledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sampleowner -d sampledb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  sampledb-maria:
+    image: mariadb:11.8.9
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${SAMPLE_MARIA_PASSWORD:?set SAMPLE_MARIA_PASSWORD in .env}
+    command: ["--character-set-server=utf8mb4", "--innodb-buffer-pool-size=128M"]
+    volumes:
+      - sample_maria:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  sampledb-ch:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: sampleowner
+      CLICKHOUSE_PASSWORD: ${SAMPLE_CH_PASSWORD:?set SAMPLE_CH_PASSWORD in .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - sample_ch:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  sampledb_data:
+  sample_maria:
+  sample_ch:

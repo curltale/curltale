@@ -1,0 +1,27 @@
+# Optional: a separate container for the Library's background work (reading documents, writing pages, building topics), so heavy jobs never
+# slow the web app. Without it the web app does the work itself (LIBRARY_WORKERS in Settings > Library).
+#   docker compose -f docker-compose.yml -f docker-compose.worker.yml up -d --build
+# This turns the web app's own workers off (SERVICE_ROLE=api) and starts one worker container. Scale it with
+#   docker compose -f docker-compose.yml -f docker-compose.worker.yml up -d --scale worker=3
+# The worker needs what the app needs to do the jobs: the same database, the same .env, and the same storage (the ./data folder, or the S3 bucket).
+# If you also use the browser service, run it with both files: -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.fetcher.yml
+services:
+  app:
+    environment:
+      SERVICE_ROLE: api
+
+  worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://studio_app:${APP_DB_PASSWORD}@db:5432/studio
+    command: ["python", "-m", "studio.worker"]
+    networks: [default, fetch]
+    volumes:
+      - ./data:/app/data
+
+networks:
+  fetch:

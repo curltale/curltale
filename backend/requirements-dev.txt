@@ -1,0 +1,5 @@
+# for running the tests and maintaining the lock; not installed in the image
+pytest
+pytest-asyncio
+pip-tools
+moto[s3]        # fakes S3 for the storage tests

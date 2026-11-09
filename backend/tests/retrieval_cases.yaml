@@ -1,0 +1,19 @@
+# question -> chunk ids that a good answer needs (any one in the top 10 counts as a hit; trailing * = prefix). Written for the test model
+# (tests/fixtures/sample_model.py). Rerun after every model change or embedding change:  python -m devtools.evalcli
+- {q: "which table holds the customer email", expect: ["attr:customer.email", "entity:customer"]}
+- {q: "how is the mean time to resolve calculated", expect: ["calc:incident.mttr_hours"]}
+- {q: "how do I get from an opportunity to an order", expect: ["rel:*"]}
+- {q: "what values can the subscription status have", expect: ["attr:subscription.subscription_status", "entity:subscription"]}
+- {q: "what is the difference between a complaint and an incident", expect: ["entity:support_case"]}
+- {q: "is the churn score master data", expect: ["entity:customer_score"]}
+- {q: "what is the format of a customer id like C1000123", expect: ["attr:customer.id", "entity:customer"]}
+- {q: "outstanding balance of an account", expect: ["calc:billing_account.outstanding_balance"]}
+- {q: "number of subsidiaries of a customer", expect: ["calc:customer.number_of_subsidiaries"]}
+- {q: "what is a prospect", expect: ["filter:customer.prospect"]}
+- {q: "which entity is a cost center", expect: ["entity:billing_account"]}
+- {q: "customers below another customer in the group", expect: ["attr:customer.parent_customer_id", "rel:*"]}
+- {q: "what kinds of invoice charge exist", expect: ["attr:invoice_line.charge_type", "entity:invoice_line"]}
+- {q: "how does an invoice link to payments", expect: ["rel:*", "entity:payment_allocation", "entity:payment"]}
+- {q: "does the customer allow marketing emails", expect: ["attr:customer.email_opt_in", "entity:customer"]}
+- {q: "who is the account manager of a customer", expect: ["entity:employee", "attr:customer.account_manager_id"]}
+- {q: "current price of a subscription", expect: ["filter:subscription_price.*"]}

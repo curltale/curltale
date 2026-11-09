@@ -1,0 +1,47 @@
+# Curltale AI: the example compose file. To install:
+#   cp docker-compose.example.yml docker-compose.yml     # then adapt it to your server (proxy, networks, names) if needed
+#   cp .env.example .env                                 # fill in the REQUIRED values
+#   docker compose up -d                                 # open http://localhost:8080 (see README "Install")
+# Nothing here depends on a particular proxy: put your own in front (nginx, Traefik, a load balancer) and tell the app about it with
+# CLIENT_IP_HEADER / TRUSTED_PROXIES in .env. Optional services (worker, browser service, S3 bucket, demo databases): the other docker-compose.*.yml files, see README "Optional services".
+services:
+  db:
+    image: pgvector/pgvector:0.8.7-pg16-bookworm   # pinned: pgvector 0.8.7 on PostgreSQL 16 (bump deliberately)
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: studio
+      POSTGRES_USER: studio                                   # superuser: setup only (db/init), never used by the app
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}   # read by db/init to create the app's own account
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro               # first start only: app account, extension, ownership
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studio -d studio"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://studio_app:${APP_DB_PASSWORD}@db:5432/studio   # the least-privileged app account, not the superuser
+    ports:
+      # localhost only by default: put a proxy with TLS in front. To expose it directly set HTTP_BIND=0.0.0.0 (and CLIENT_IP_HEADER= in .env).
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8080}:8000"
+    volumes:
+      - ./data:/app/data                                      # backups, file databases for connectors (SQLite, DuckDB), original files of the Library (data/library)
+
+  # Optional services live in their own files, added with -f (nothing here to uncomment):
+  #   docker-compose.worker.yml   a separate container for the Library's background work
+  #   docker-compose.fetcher.yml  the browser service, for web pages that need JavaScript
+  #   docker-compose.storage.yml  an S3-compatible bucket for the Library's original files
+  #   docker-compose.demo.yml     demo databases for trying the connectors
+  # Example: docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.fetcher.yml -f docker-compose.storage.yml up -d --build
+
+volumes:
+  db_data:

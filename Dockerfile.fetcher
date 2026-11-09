@@ -1,0 +1,11 @@
+# The optional browser service for the Library: renders web pages that need JavaScript. It has no database, no files and no app secrets;
+# its only job is to answer /render for the app (see backend/studio/fetcher.py for how it keeps the browser away from the network).
+FROM mcr.microsoft.com/playwright/python:v1.51.0-noble
+WORKDIR /app
+RUN pip install --no-cache-dir playwright==1.51.0 fastapi==0.159.1 uvicorn==0.54.0 httpx==0.28.1 pydantic==2.14.1
+COPY backend/studio/library/netguard.py backend/studio/fetcher.py ./
+USER pwuser
+ENV FETCH_NO_SANDBOX=1
+EXPOSE 8001
+HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health')"
+CMD ["python", "fetcher.py"]

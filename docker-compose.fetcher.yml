@@ -1,0 +1,30 @@
+# Optional: the browser service, for web pages that only show their content after JavaScript runs. Without it, web addresses are fetched as plain
+# pages (enough for most documentation and articles).
+#   docker compose -f docker-compose.yml -f docker-compose.fetcher.yml up -d --build
+# Put these in .env (or enter the same values on Settings > Web capture):
+#   FETCHER_TOKEN=<long and random: openssl rand -hex 32>
+#   FETCHER_URL=http://fetcher:8001
+#   FETCH_RENDER=auto                   # auto: render only pages that have almost no text without JavaScript; always; never
+# The fetcher has no database, no files and no app secrets. It shares only the `fetch` network with the app (and the worker, if you run one),
+# so it cannot reach the database. Every request its browser makes is answered by the same address guard the app uses: private, loopback and
+# cloud-metadata addresses are refused (list intranet hosts in FETCH_ALLOWED_HOSTS here AND in Settings > Web capture if you really need them).
+services:
+  app:
+    networks: [default, fetch]
+
+  fetcher:
+    build: {context: ., dockerfile: Dockerfile.fetcher}
+    restart: unless-stopped
+    environment:
+      FETCHER_TOKEN: ${FETCHER_TOKEN:?set FETCHER_TOKEN in .env}
+      FETCH_ALLOWED_HOSTS: ${FETCH_ALLOWED_HOSTS:-}
+    networks: [fetch]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 1g
+
+networks:
+  fetch:
