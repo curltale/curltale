@@ -5,8 +5,9 @@ import { useStudio } from '../context.jsx'
 import { Pill, Tabs } from '../components/ui.jsx'
 
 const LEVELS = [['confidential', 'Confidential', 'financial and other business-sensitive values'], ['personal', 'Personal', 'definitions of names, emails, mobiles'],
-  ['restricted', 'Restricted', 'identity numbers, credentials and similar'], ['data', 'Can query data', 'plan_query and query_data on the database (rows follow the same switches)']]
-const DEF_ENT = { confidential: true, personal: true, restricted: false, data: false }      // tokens: structure only until granted
+  ['restricted', 'Restricted', 'identity numbers, credentials and similar'], ['data', 'Can query data', 'plan_query and query_data on the database (rows follow the same switches)'],
+  ['sources', 'Show sources', 'where each fact comes from in the document tools: citation markers, the documents behind a topic, links into the app. Turn it off for a customer-facing agent']]
+const DEF_ENT = { confidential: true, personal: true, restricted: false, data: false, sources: true }      // tokens: structure only until granted
 const DEF_USER = { ...DEF_ENT, data: true }
 
 function Ent({ value, onChange, disabled }) {

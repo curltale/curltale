@@ -50,10 +50,10 @@ def library(client, world, ai, embedded):
     # the internal collection is tagged internal
     _admin(client); client.post(f'/api/library/collections/{b}/self-grant', json={'level': 'manage'}); client.patch(f'/api/library/collections/{b}', json={'usage': 'internal'})
     _run()
-    toks = {n: auth.create_api_token(f'agent-{n}', {'data': False}) for n in ('a', 'ab', 'none')}
+    toks = {n: auth.create_api_token(f'agent-{n}', {'data': False, **({'sources': False} if n == 'quiet' else {})}) for n in ('a', 'ab', 'none', 'quiet')}
     with db.conn() as c:
         ids = {n: c.execute('SELECT id FROM api_token WHERE name=%s', (f'agent-{n}',)).fetchone()['id'] for n in toks}
-        for cid, who in ((a, 'a'), (a, 'ab'), (b, 'ab')):
+        for cid, who in ((a, 'a'), (a, 'ab'), (b, 'ab'), (a, 'quiet')):
             c.execute('INSERT INTO library.grant_ (collection_id, token_id, level) VALUES (%s,%s,%s)', (cid, ids[who], 'read'))
     yield {**world, 'toks': toks, 'fake': fake}
     with db.conn() as c:
@@ -275,3 +275,76 @@ def test_an_external_agent_is_told_how_to_read_a_question_and_what_to_do_next(cl
     assert 'library_context' in with_docs['next']                                          # found in the documents, or pointed at them
     assert 'library_context' not in without['next'] and 'not known' in without['next'] and 'found_in_documents' not in without
     assert 'library_context' not in mcp_call(client, none, 'search', {'query': 'zzqqx nothing like it'}).get('next', '')
+
+
+def _everything(x):
+    """Every key and every string value anywhere in a result."""
+    if isinstance(x, dict):
+        for k, v in x.items():
+            yield k
+            yield from _everything(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _everything(v)
+    elif isinstance(x, str):
+        yield x
+
+
+def test_a_credential_without_sources_gets_the_content_and_no_citation_apparatus(client, library):
+    """The switch is per credential: the same tools, the same pages, without markers, source lists, links into the app and collection ids."""
+    quiet, normal, col = library['toks']['quiet'], library['toks']['a'], f'Alpha {MARK_A}'
+    # the tool list: one tool goes (documents behind a topic), the descriptions stop talking about sources
+    tools_q = {x['name']: x for x in _rpc(client, quiet, 'tools/list')['tools']}
+    tools_n = {x['name']: x for x in _rpc(client, normal, 'tools/list')['tools']}
+    assert set(tools_n) - set(tools_q) == {'library_topic_sources'}
+    from studio import mcp_server
+    for name, old, _new in mcp_server.WITHOUT_SOURCES:                                   # every replacement still finds its text: a reworded description must fail here, not silently keep the old words
+        assert old in ' '.join(tools_n[name]['description'].split()), (name, old)
+    for name, prop, old, _new in mcp_server.WITHOUT_SOURCES_PARAMS:
+        assert old in tools_n[name]['inputSchema']['properties'][prop]['description'], (name, prop)
+    for name, x in tools_q.items():
+        assert '[s1]' not in x['description'] and 'library_topic_sources' not in json.dumps(x), name
+    assert '[s1]' in tools_n['library_context']['description'] and 'library_topic_sources' in tools_n['library_context']['description']      # the switch is per credential: nothing leaked across
+    assert 'wiki_passage' in json.dumps(tools_n['library_source']['inputSchema']) and 'wiki_passage' not in json.dumps(tools_q['library_source']['inputSchema'])
+    # a page keeps its words and loses its markers
+    q = mcp_call(client, quiet, 'library_context', {'query': 'refund thirty days'})
+    n = mcp_call(client, normal, 'library_context', {'query': 'refund thirty days'})
+    block, nblock = q['results'][0], n['results'][0]
+    assert 'sources' not in block and 'sources' in nblock and 'collection_id' not in block and 'collection_id' in nblock
+    md_q, md_n = block['topics'][0]['markdown'], nblock['topics'][0]['markdown']
+    assert '[s1]' in md_n and '[s' not in md_q and '[source:' not in md_q and md_q.count('thirty days') == md_n.count('thirty days')
+    assert 'link' not in set(_everything(q)) and 'link' in set(_everything(n))
+    assert ' .' not in md_q and ' ,' not in md_q                                                    # no gap left where a marker stood
+    # topic, claims, sources
+    t = mcp_call(client, quiet, 'library_topic', {'collection': col, 'topic': 'refund-policy'})
+    assert 'sources' not in t and 'link' not in t and 'library_topic_sources' not in t['next'] and t['markdown'].startswith('# Refund policy') and '[s' not in t['markdown']
+    cl = mcp_call(client, quiet, 'library_topic_claims', {'collection': col, 'topic': 'refund-policy'})
+    first = cl['claims'][0]
+    assert first['claim'] == 'A yearly plan is refundable within thirty days.' and first['quotes'][0].startswith('Yearly plans') and 'sources' not in first and 'link' not in set(_everything(cl))
+    assert 'error' in mcp_call(client, quiet, 'library_topic_sources', {'collection': col, 'topic': 'refund-policy'})
+    # the content tools still work, without the references: a search hit carries what library_source needs
+    s = mcp_call(client, quiet, 'library_source_search', {'query': 'refundable thirty days'})
+    hit = s['results'][0]['sources'][0]
+    assert hit['source_id'] and hit['name'] == 'a.md' and 'link' not in hit and hit['matched']
+    page = mcp_call(client, quiet, 'library_source', {'collection': col, 'source': hit['source_id'], 'query': 'refundable'})
+    assert page['passages'] and 'link' not in page and 'url' not in page and 'collection_id' not in page
+    assert 'collection_id' not in json.dumps(mcp_call(client, quiet, 'library_collections')) and 'link' not in set(_everything(mcp_call(client, quiet, 'library_search', {'query': 'refund'})))
+    # the model tools that point at documents carry no paths into the app either
+    sc = mcp_call(client, quiet, 'get_access')
+    assert 'sources' in sc['meaning'] and 'off' in sc['meaning']['sources'] and 'sources' not in sc['entitlements']
+    assert 'sources' not in mcp_call(client, normal, 'get_access')['meaning']
+    # Alfred is a different credential: the signed-in user's own switch, on by default
+    from studio import access
+    access.set_caller('ann', {'data': True}, user=True)
+    assert access.shows_sources() is True
+    access.set_caller('ann', {'data': True, 'sources': False}, user=True)
+    assert access.shows_sources() is False
+    access.set_caller('ann', None, user=True)
+
+
+def test_the_sources_switch_is_set_with_the_other_entitlements(client, library):
+    from studio import access
+    assert access.normalize(auth.api_token(library['toks']['quiet'])['entitlements'])['sources'] is False
+    assert access.normalize(auth.api_token(library['toks']['a'])['entitlements'])['sources'] is True
+    assert access.normalize({})['sources'] is True and access.normalize({'sources': False})['sources'] is False
+    assert access.normalize_user({'sources': False})['sources'] is False and access.FULL['sources'] is True

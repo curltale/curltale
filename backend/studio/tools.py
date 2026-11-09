@@ -528,11 +528,13 @@ def get_access() -> dict:
     policy = _onto(_vid()).get('access_policy', {})
     meaning = {lvl: (policy.get(lvl) or '') + ('' if ent.get(lvl, True) else ' [NOT GRANTED: hidden from every answer]') for lvl in ('internal', 'confidential', 'personal', 'restricted')}
     meaning['data'] = ('may query the database with plan_query / query_data; rows are filtered by the same entitlements' if ent['data'] else 'structure only: you cannot query data')
+    if not ent.get('sources', True):
+        meaning['sources'] = ('off: the documents come without citation markers, links or lists of source documents; you cannot ask for them, and you do not need to cite sources')
     try:
         meaning['sql_dialect'] = f'the database speaks {datastore.driver().label}: write SQL in that dialect (plan_query returns its skeleton already in it)'
     except Exception:
         pass
-    return {'caller': name, 'entitlements': {'internal': True, **ent}, 'meaning': meaning,
+    return {'caller': name, 'entitlements': {'internal': True, **{k: v for k, v in ent.items() if k != 'sources'}}, 'meaning': meaning,
             'note': 'Entitlements decide which definitions and which data columns you can see. A withheld item is not empty or zero: say it is withheld.'}
 
 

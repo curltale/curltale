@@ -3,6 +3,7 @@
 What a client gets for free, without anything in its own prompt: the `instructions` (built from the published model, so the agent rules
 travel with them and follow every edit), tool descriptions with documented parameters, read-only annotations, a guide resource and ready prompts.
 """
+import copy
 import inspect
 import time
 
@@ -25,7 +26,7 @@ Ontology and data: `get_access` (what may I see) - `search` (find by words or co
 Documents (only if your credential has collections): `library_context` (PRIMARY: whole topic pages for a question) - `library_search` (which topics
 exist) - `library_topic` (one page) - `library_topic_claims` (facts with exact quotes) - `library_topic_sources` (documents behind a topic) -
 `library_traverse` (related topics) - `library_source_search` / `library_source` (the verified page of each document, for detail) -
-`library_vocabulary` - `library_collections`.
+`library_vocabulary` - `library_collections`. A credential without "sources" gets pages with no citation markers or links, and no `library_topic_sources`: do not ask for them.
 
 ## Start
 Call `get_access` once. Whatever it does not grant is absent from every answer: say it is withheld, never treat it as empty or zero.
@@ -156,20 +157,60 @@ from starlette.concurrency import run_in_threadpool
 _list_tools = mcp._mcp_server.request_handlers[mcp_types.ListToolsRequest]
 
 
-def _may_use_library(tok):
+def _library_view(tok):
+    """(may this token use the document tools, may it see sources) for tools/list."""
     info = auth.api_token(tok, touch=False)
-    return bool(info) and library_agent.available((library_scope.for_token(info['id'], info['name']), 'agent'))
+    if not info:
+        return False, False
+    return library_agent.available((library_scope.for_token(info['id'], info['name']), 'agent')), access.normalize(info['entitlements'])['sources']
+
+
+# What the document tools say about sources, for a credential that does not show them: the same descriptions without the parts that would only confuse.
+# Each entry is (tool, text, replacement); a test fails when a text is no longer in its description.
+WITHOUT_SOURCES = [
+    ('library_context', "pages cite sources as [s1], [s2]..., listed once in `sources`", "no source references"),
+    ('library_context', "the claims behind a page are in library_topic_claims, the documents in library_topic_sources.", "the claims behind a page are in library_topic_claims."),
+    ('library_topic', "(sources cited as [s1], [s2]..., listed in `sources`)", ""),
+    ('library_topic', "the source documents behind it and the data-model entities it is about", "the data-model entities it is about"),
+    ('library_topic_claims', "each with its exact quote copied from the source wiki, the source, the wiki version the quote comes from and the wiki passage it sits in. Use it when you need provenance: \"where does this fact come from?\". Read the quoted page with library_source.",
+     "each with its exact quote."),
+]
+WITHOUT_SOURCES_PARAMS = [
+    ('library_source', 'source', "(from library_topic_sources, library_topic_claims or library_source_search)", "(from library_source_search)"),
+    ('library_source', 'around', "(a `wiki_passage` of a claim, or a `passage` of a search hit)", "(a `passage` of a search hit)"),
+]
+
+
+def _without_sources(tools_):
+    out = []
+    for t_ in tools_:
+        if t_.name == 'library_topic_sources':
+            continue
+        t_.description = ' '.join((t_.description or '').split())                    # one space between words, as the replacements are written
+        for name, old, new in WITHOUT_SOURCES:
+            if name == t_.name:
+                t_.description = ' '.join(t_.description.replace(old, new).split())
+        for name, prop, old, new in WITHOUT_SOURCES_PARAMS:
+            if name == t_.name:
+                t_.inputSchema = copy.deepcopy(t_.inputSchema)                        # the schema is shared between requests: never edit it in place
+                d = (t_.inputSchema.get('properties', {}).get(prop) or {})
+                if d.get('description'):
+                    d['description'] = d['description'].replace(old, new)
+        out.append(t_)
+    return out
 
 
 async def _filtered_list_tools(req):
     res = await _list_tools(req)
     try:
         r = request_ctx.get().request
-        ok = await run_in_threadpool(_may_use_library, r.headers.get('authorization', '')[7:] if r is not None else '')
+        ok, sources = await run_in_threadpool(_library_view, r.headers.get('authorization', '')[7:] if r is not None else '')
     except Exception:
-        ok = False
+        ok, sources = False, False
     if not ok:
         res.root.tools = [t for t in res.root.tools if not t.name.startswith('library_')]
+    elif not sources:
+        res.root.tools = _without_sources(res.root.tools)
     return res
 
 

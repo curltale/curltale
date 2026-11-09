@@ -26,7 +26,7 @@ import re
 from contextvars import ContextVar
 from typing import Annotated, Literal
 from pydantic import Field
-from .. import config, embeddings, settings, vectors
+from .. import access, config, embeddings, settings, vectors
 from ..db import conn
 from . import bridge, index, rerank, retrieval, scope as S, topics, vocab
 
@@ -40,9 +40,10 @@ def _safe(fn):
     @functools.wraps(fn)
     def run(*a, **k):
         try:
-            return fn(*a, **k)
+            out = fn(*a, **k)
         except RuntimeError as e:
             return {'error': str(e)}
+        return out if access.shows_sources() else _no_nulls(out)
     return run
 
 
@@ -91,7 +92,7 @@ def _pick(ref):
 
 
 def _head(col):
-    return {'collection': col.name, 'collection_id': col.id, 'usage': col.usage, 'usage_note': S.USAGE_NOTE[col.usage]}
+    return {'collection': col.name, **({'collection_id': col.id} if access.shows_sources() else {}), 'usage': col.usage, 'usage_note': S.USAGE_NOTE[col.usage]}
 
 
 def _model_of(col, tid):
@@ -103,11 +104,31 @@ def _model_of(col, tid):
 
 
 def _link(col, slug):
-    return f'/library/topics/{slug}?c={col.id}'
+    """A path inside the Curltale web app. Only for a credential that shows sources: an agent outside the app cannot open it."""
+    return f'/library/topics/{slug}?c={col.id}' if access.shows_sources() else None
 
 
 def _source_link(col, sid):
-    return f'/library/sources/{sid}?c={col.id}'
+    return f'/library/sources/{sid}?c={col.id}' if access.shows_sources() else None
+
+
+def _no_nulls(obj):
+    """Drops every `link` (a path into the app, or None) anywhere in a result: a credential without sources gets no paths into the app."""
+    if isinstance(obj, dict):
+        return {k: _no_nulls(v) for k, v in obj.items() if not (k == 'link' and (v is None or str(v).startswith('/library/')))}
+    if isinstance(obj, list):
+        return [_no_nulls(x) for x in obj]
+    return obj
+
+
+def _drop_ids(blocks):
+    """Collection ids are handles into the app: a credential without sources does not get them."""
+    return [{k: v for k, v in b.items() if k != 'collection_id'} for b in blocks]
+
+
+def _clean_markers(md):
+    """A page without its `[source: ...]` citations: no marker, and no gap left where it stood."""
+    return SOURCE_GAP.sub('', md or '')
 
 
 # ---------------------------------------------------------------- tools
@@ -142,10 +163,14 @@ def _topic_hits(col, query, k):
 
 
 SOURCE_REF = re.compile(r'`?\[source:\s*([0-9a-fA-F-]{36})\]`?')
+SOURCE_GAP = re.compile(r'[ \t]*`?\[source:\s*[0-9a-fA-F-]{36}\]`?')
 
 
 def _short_citations(col, markdown, legend):
-    """`[source: <uuid>]` (about 15 tokens each, on every line of a page) becomes [s1], [s2]...; legend maps each short reference to the source once."""
+    """`[source: <uuid>]` (about 15 tokens each, on every line of a page) becomes [s1], [s2]...; legend maps each short reference to the source once.
+    For a credential without sources the markers are removed and the legend stays empty."""
+    if not access.shows_sources():
+        return _clean_markers(markdown)
     def one(m):
         sid = m.group(1).lower()
         if sid not in legend['by_id']:
@@ -250,7 +275,7 @@ def library_context(query: Annotated[str, Field(description="The user's question
             with conn() as c:
                 names = {r['id']: r['slug'] for r in c.execute('SELECT id, slug FROM library.topic WHERE id = ANY(%s)', ([l['from_topic'], l['to_topic']],)).fetchall()}
             rels.append({'from': names.get(l['from_topic']), 'relation': l['relation'], 'to': names.get(l['to_topic']), 'context': l['context']})
-        blocks.append({**_head(col), 'answerable': True, 'topics': out, 'sources': _legend(col, legend), 'related': graph, 'relationships': rels})
+        blocks.append({**_head(col), 'answerable': True, 'topics': out, **({'sources': _legend(col, legend)} if access.shows_sources() else {}), 'related': graph, 'relationships': rels})
     answerable = bool(blocks)
     return {'query': query, 'answerable': answerable, 'results': blocks, 'meta': {'topics_found': sum(len(b['topics']) for b in blocks), 'total_tokens': total},
             'note': NOTE if answerable else 'The knowledge base does not cover this question. Say so; do not answer from your own knowledge.',
@@ -311,10 +336,12 @@ def library_topic(collection: Annotated[str, Field(description='Collection name,
         refs.setdefault(str(r['id']), f's{len(refs) + 1}')
     return {**_head(col), 'topic': t['slug'], 'title': t['title'], 'type': t['topic_type'], 'kind_of': bridge.kinds_of(col.id, [t['id']]).get(t['id'], []), 'summary': t['summary'],
             'link': _link(col, t['slug']), 'aliases': aliases, 'version': ver, 'markdown': md, 'needs_revision': t['needs_revision'], 'model': _model_of(col, t['id']),
-            'sources': [{'ref': refs[str(r['id'])], 'source_id': str(r['id']), 'name': r['title'] or r['name'], 'wiki_version': r['wiki_version'], 'link': _source_link(col, r['id'])} for r in srcs],
+            **({'sources': [{'ref': refs[str(r['id'])], 'source_id': str(r['id']), 'name': r['title'] or r['name'], 'wiki_version': r['wiki_version'], 'link': _source_link(col, r['id'])} for r in srcs]}
+               if access.shows_sources() else {}),
             'related': [{'relation': r['relation'], 'topic': r['slug'], 'title': r['title'], 'why': r['context']} for r in out],
             'related_from': [{'relation': r['relation'], 'topic': r['slug'], 'title': r['title'], 'why': r['context']} for r in inc],
-            'next': 'Exact quotes: library_topic_claims. Related topics: library_traverse. The documents behind it: library_topic_sources, then library_source.'}
+            'next': ('Exact quotes: library_topic_claims. Related topics: library_traverse. The documents behind it: library_topic_sources, then library_source.' if access.shows_sources()
+                     else 'Exact quotes: library_topic_claims. Related topics: library_traverse. A detail the page lacks: library_source_search.')}
 
 
 @_safe
@@ -331,6 +358,9 @@ def library_topic_claims(collection: Annotated[str, Field(description='Collectio
         claims = c.execute("SELECT id, n, text, kind FROM library.claim WHERE topic_id=%s AND collection_id=%s AND status='active' ORDER BY n", (t['id'], col.id)).fetchall()
         ev = c.execute("SELECT cs.claim_id, cs.source_id, s.name, s.title, cs.quote, cs.wiki_version, cs.wiki_chunk FROM library.claim_source cs LEFT JOIN library.source s ON s.id=cs.source_id AND s.collection_id=cs.collection_id "
                        "WHERE cs.collection_id=%s AND cs.claim_id = ANY(%s) ORDER BY cs.id", (col.id, [x['id'] for x in claims])).fetchall()
+    if not access.shows_sources():                                                      # the facts and their exact words, without where they come from
+        return {**_head(col), 'topic': t['slug'], 'title': t['title'],
+                'claims': [{'n': x['n'], 'claim': x['text'], 'type': x['kind'], 'quotes': list(dict.fromkeys(e['quote'] for e in ev if e['claim_id'] == x['id']))} for x in claims]}
     return {**_head(col), 'topic': t['slug'], 'title': t['title'], 'link': _link(col, t['slug']),
             'claims': [{'n': x['n'], 'claim': x['text'], 'type': x['kind'],
                         'sources': [{'source_id': str(e['source_id']) if e['source_id'] else None, 'name': (e['title'] or e['name']) if e['source_id'] else '(deleted source)',
@@ -339,12 +369,16 @@ def library_topic_claims(collection: Annotated[str, Field(description='Collectio
             'next': 'To read a quote in context: library_source with its source_id and around = its wiki_passage.'}
 
 
+
+
 @_safe
 def library_topic_sources(collection: Annotated[str, Field(description='Collection name, slug or id')],
                           topic: Annotated[str, Field(description='Topic slug, title or alias')]) -> dict:
     """The source documents that contributed to a topic: name, kind, address, the version of each source wiki the topic was built from, and whether that
     wiki is still the approved one. Read a source's wiki with library_source.
     Each result carries its collection's usage tag: `public` may be shared with customers; `internal` is for your understanding only, do not quote it to customers."""
+    if not access.shows_sources():
+        return {'error': 'your credential does not show sources'}
     col = _pick(collection)
     t, err = _topic_or_error(col, topic)
     if err:
@@ -452,7 +486,7 @@ def library_source(collection: Annotated[str, Field(description='Collection name
     if not src:
         return {**_head(col), 'error': f'no document {ref!r} in this collection (library_topic_sources names the documents behind a topic)'}
     sid = str(src['id'])
-    head = {**_head(col), 'source_id': sid, 'name': src['title'] or src['name'], 'link': _source_link(col, sid), **({'url': src['url']} if src['url'] else {})}
+    head = {**_head(col), 'source_id': sid, 'name': src['title'] or src['name'], 'link': _source_link(col, sid), **({'url': src['url']} if src['url'] and access.shows_sources() else {})}
     if original:
         with conn() as c:
             total = c.execute('SELECT count(*) AS n FROM library.source_chunk WHERE collection_id=%s AND source_id=%s', (col.id, sid)).fetchone()['n']
@@ -517,7 +551,7 @@ def related_documents(entity_key, limit=5):
     blocks = [b for b in bridge.documents_for(p[0], 'entity', entity_key, limit) if b['collection_id'] in cols]
     for b in blocks:
         b['collection'] = b['collection']
-    return blocks
+    return blocks if access.shows_sources() else _no_nulls(_drop_ids(blocks))
 
 
 def _brief(col, t, why):
@@ -558,7 +592,7 @@ def documents_for_question(question, entity_keys, cap=25):
             blocks.append({**_head(col), 'topics': [{**i, 'why': '; '.join(i['why'])} for i in items]})
     if more and blocks:
         blocks[-1]['more_topics'] = f'{more} more matched; use library_search to see them'
-    return blocks
+    return blocks if access.shows_sources() else _no_nulls(blocks)
 
 
 def lookup_name(name, limit=5):
@@ -581,4 +615,4 @@ def lookup_name(name, limit=5):
             out.append({'topic': tt['slug'], 'title': tt['title'], 'type': tt['topic_type'], 'summary': (tt['summary'] or '')[:300], 'exact': bool(t), 'model': _model_of(col, tt['id']), 'link': _link(col, tt['slug'])})
         if out:
             blocks.append({**_head(col), 'topics': out})
-    return blocks
+    return blocks if access.shows_sources() else _no_nulls(blocks)

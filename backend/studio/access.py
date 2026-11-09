@@ -9,17 +9,18 @@ enforced server-side in search and in every tool. Unknown callers get DEFAULT: f
 from contextvars import ContextVar
 
 LEVELS = ('confidential', 'personal', 'restricted')
-# 'data' is a capability, not a sensitivity: may this credential query the (synthetic) database at all?
-DEFAULT = {'confidential': True, 'personal': True, 'restricted': False, 'data': False}     # MCP tokens: structure only until an admin grants data
+# 'data' and 'sources' are capabilities, not sensitivities. data: may this credential query the (synthetic) database at all?
+# sources: do the document tools show where a fact comes from (citation markers, the list of documents, links into the app)? Off for a customer-facing agent.
+DEFAULT = {'confidential': True, 'personal': True, 'restricted': False, 'data': False, 'sources': True}     # MCP tokens: structure only until an admin grants data
 USER_DEFAULT = {**DEFAULT, 'data': True}                                                      # people logged into the UI can already browse it
-FULL = {'confidential': True, 'personal': True, 'restricted': True, 'data': True}
+FULL = {'confidential': True, 'personal': True, 'restricted': True, 'data': True, 'sources': True}
 
 CALLER: ContextVar = ContextVar('caller', default=('anonymous', DEFAULT))
 
 
 def normalize(ent, default=None):
     ent, default = ent or {}, default or DEFAULT
-    return {k: bool(ent.get(k, default[k])) for k in (*LEVELS, 'data')}
+    return {k: bool(ent.get(k, default[k])) for k in (*LEVELS, 'data', 'sources')}
 
 
 def normalize_user(ent):
@@ -38,6 +39,11 @@ def set_caller(name, ent, user=False):
 
 def caller():
     return CALLER.get()
+
+
+def shows_sources():
+    """May the document tools show this caller where a fact comes from? (An unknown caller keeps the default: on.)"""
+    return bool(caller()[1].get('sources', True))
 
 
 def can_see(sensitivity, agent_access, ent=None):

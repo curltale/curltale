@@ -2,6 +2,11 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [Unreleased]
+
+### Added
+- **Show sources**, a fifth entitlement on tokens and users. Off, the document tools return the content without the trail: no `[s1]` citation markers, no `sources` list, no links into the app, no collection ids, claims as their exact quotes, and `library_topic_sources` is not offered. The tool descriptions follow, so an agent is not told about what it cannot get. On by default, so nothing changes for existing credentials; Alfred uses the signed-in user's switch. Set it on **Users & access**.
+
 ## [0.2.0] - 2026-11-09
 
 First public release.
