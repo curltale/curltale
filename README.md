@@ -4,7 +4,7 @@
 
 **A hippocampus for AI agents: it grounds them in an ontology of your business data and a knowledge base of verified facts, so they know what your data means and what is true.**
 
-The hippocampus is the part of the brain that turns experience into lasting, connected memory. Its name is Greek for seahorse, because of its curled shape. Curltale does that job for what your organisation knows: it takes your data and your documents and curls them into knowledge an agent can rely on, with proof.
+The hippocampus is the part of the brain that turns experience into lasting, connected memory. Its name is Greek for seahorse, because of its curled shape. Curltale does that job for what your organisation knows: it takes your data and your documents and turns them into knowledge an agent can rely on, with proof.
 
 It has two halves that share one login, one settings page, one activity log, one MCP endpoint and one built-in assistant, **Alfred**:
 
@@ -79,7 +79,7 @@ CI runs the suite at two embedding sizes, builds the UI and both images, and aud
 
 ## Why Curltale?
 
-Curltale is curl plus tale. A seahorse curls its tail around something steady so the current cannot carry it away; that is our picture of what the product does. It holds on to your ontology and your verified facts, and curls your data and documents into a tale an agent can tell again, with proof. The name also nods to the hippocampus, the part of the brain that turns experience into memory, which is named for its seahorse-like curl.
+The hippocampus is the part of the brain that turns experience into lasting, connected memory. It is named for the seahorse, because of its curled shape, and its other old name, *Cornu Ammonis*, means "Ammon's horn", a ram's horn. Curltale does that job for what your organisation knows: it holds on to your ontology and your verified facts, and turns your data and documents into a tale an agent can tell again, with proof. The seahorse is also our picture of holding on: it wraps its tail around something steady so the current cannot carry it away.
 
 ## Licence
 
