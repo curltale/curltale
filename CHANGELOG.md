@@ -2,7 +2,7 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
-## [Unreleased]
+## [0.2.1] - 2026-11-10
 
 ### Security
 This release hardens several parts of the platform. Upgrading is recommended for every installation, and in particular for those that connect to their own database or run the browser service.
