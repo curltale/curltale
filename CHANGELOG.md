@@ -4,6 +4,17 @@ All notable changes are listed here. The project follows semantic versioning; be
 
 ## [Unreleased]
 
+### Security
+This release hardens several parts of the platform. Upgrading is recommended for every installation, and in particular for those that connect to their own database or run the browser service.
+- **Data queries:** stricter checks on what a query may contain. Every column must be named, and only standard functions that compute from their arguments can be called. Add your own safe database functions with `SQL_ALLOWED_FUNCTIONS` in `.env`.
+- **Masked columns:** tighter rules. A masked column joins only to another masked column, and ordering by one orders by its hash.
+- **Request size:** requests to `/api` and `/mcp` have a size limit (`MAX_BODY_MB`, default 4; uploads and Excel models keep their own limits), and larger requests are accepted only from a signed-in caller or a valid token.
+- **Secrets:** the app does not start with a missing, placeholder or short (under 32 characters) `SECRET_KEY`, nor with the placeholder passwords of `.env.example`.
+- **Browser service:** a current browser (Playwright 1.64.1) that runs inside its own sandbox. The container needs the seccomp profile and settings of the new `docker-compose.fetcher.yml`: rebuild it with `--build`. On a host without user namespaces, set `FETCH_NO_SANDBOX=1`.
+
+### Changed
+- A query that joins a masked column to a readable column, or calls a database function that is not a standard one, is now refused with an explanation.
+
 ### Added
 - **Show sources**, a fifth entitlement on tokens and users. Off, the document tools return the content without the trail: no `[s1]` citation markers, no `sources` list, no links into the app, no collection ids, claims as their exact quotes, and `library_topic_sources` is not offered. The tool descriptions follow, so an agent is not told about what it cannot get. On by default, so nothing changes for existing credentials; Alfred uses the signed-in user's switch. Set it on **Users & access**.
 

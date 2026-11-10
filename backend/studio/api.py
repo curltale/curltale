@@ -19,6 +19,7 @@ FRONTEND = Path(os.environ.get('FRONTEND_DIR', Path(__file__).resolve().parents[
 
 
 def bootstrap():
+    config.require_secrets()                   # before anything else: no service with a guessable key
     db.init_schema()
     from .library import vocab as library_vocab
     library_vocab.seed_all()                   # collections made before topics existed get the starter vocabulary
@@ -96,6 +97,10 @@ async def rate_limit(request: Request, call_next):
     if not ok:
         return JSONResponse({'detail': f'{what}: try again in {wait} s'}, status_code=429, headers={'Retry-After': str(wait)})
     return await call_next(request)
+
+
+from .bodylimit import BodyLimit
+app.add_middleware(BodyLimit)                  # outermost: the size of a request is settled before anything reads it
 
 
 @app.exception_handler(editing.EditError)

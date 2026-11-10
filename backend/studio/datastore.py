@@ -53,7 +53,7 @@ def run(sql, params=None, max_rows=None, ent=None):
         if ex.privilege:
             raise DataError('permission denied: the query touches columns your entitlements do not cover (confidential, personal or restricted data). '
                             'List the columns you need instead of SELECT *.') from ex
-        msg = str(ex)
+        msg = str(ex).replace(drivers.mask_salt(), '***')      # a database that quotes the statement in its error must not hand out the salt of the masked values
         row = active_connector()
         if row and MISSING.search(msg):                       # a missing table on a database that is clearly not the modelled one: say that, once
             hint = connectors.mismatch_hint(row)

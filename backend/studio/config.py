@@ -57,6 +57,7 @@ RATE_BURST = int(env('RATE_BURST', '60'))
 LOGIN_PER_MIN = int(env('LOGIN_PER_MIN', '10'))
 ALFRED_PER_MIN = int(env('ALFRED_PER_MIN', '20'))
 INGEST_PER_MIN = int(env('INGEST_PER_MIN', '20'))                  # documents one user may add per minute (uploads, web addresses)
+MAX_BODY_MB = int(env('MAX_BODY_MB', '4'))                         # largest ordinary request (JSON); uploads and Excel models have their own limits (bodylimit.py)
 
 # Alfred and data access (also changeable on the Settings page, see settings.py)
 ALFRED_TEMPERATURE = float(env('ALFRED_TEMPERATURE', '0.2'))
@@ -64,3 +65,33 @@ ALFRED_MAX_LOOKUPS = int(env('ALFRED_MAX_LOOKUPS', '10'))       # tool rounds be
 ALFRED_TOOL_RESULT_CHARS = int(env('ALFRED_TOOL_RESULT_CHARS', '48000'))   # agents receive whole topic pages; this is a safety cap, not a budget
 AGENT_MAX_ROWS = int(env('AGENT_MAX_ROWS', '100'))
 CONSOLE_MAX_ROWS = int(env('CONSOLE_MAX_ROWS', '500'))
+
+
+# ---------------------------------------------------------------- secrets a deployment must set itself
+PLACEHOLDERS = ('change-me', 'changeme', 'dev-secret', 'secret', 'password', 'example')
+MIN_SECRET = 32
+
+
+def secret_problems():
+    """What is wrong with the secrets this process was started with ([] when nothing is). SECRET_KEY signs sessions and derives the keys that
+    encrypt stored passwords, salt masked values and protect the demo database: a missing, short or copied value makes all of that guessable."""
+    from urllib.parse import urlparse
+    out = []
+    key = os.environ.get('SECRET_KEY') or ''
+    if not key:
+        out.append('SECRET_KEY is not set')
+    elif key.lower().startswith(PLACEHOLDERS) or len(key) < MIN_SECRET:
+        out.append(f'SECRET_KEY is a placeholder or shorter than {MIN_SECRET} characters')
+    pw = urlparse(DATABASE_URL).password or ''
+    if pw.lower().startswith(PLACEHOLDERS[:2]):
+        out.append('the database password (APP_DB_PASSWORD) is still the placeholder of .env.example')
+    if (ADMIN_PASSWORD or '').lower().startswith(PLACEHOLDERS[:2]):
+        out.append('INITIAL_ADMIN_PASSWORD is still the placeholder of .env.example')
+    return out
+
+
+def require_secrets():
+    """Refuse to start with secrets anybody can guess. Called by the web app and the worker when they start, not on import (tools and tests import freely)."""
+    problems = secret_problems()
+    if problems:
+        raise RuntimeError('Curltale AI will not start with these settings: ' + '; '.join(problems) + '. Set them in .env (generate values with: openssl rand -hex 32).')

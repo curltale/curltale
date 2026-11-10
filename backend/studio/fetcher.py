@@ -3,7 +3,8 @@
 
 Safety: the browser itself never touches the network. Every request it makes is intercepted and answered by our own checked fetch (netguard:
 public addresses only, the IP pinned, redirects re-checked), and the browser is started with a proxy that goes nowhere, so anything that slips
-past the interception (a WebSocket, a prefetch) fails; loopback is not exempt from that. Only GET is served, images, media and fonts are not loaded, and the number of requests
+past the interception (a WebSocket, a prefetch) fails; loopback is not exempt from that. Chromium keeps its own sandbox on (the container is given the
+seccomp profile that lets it; FETCH_NO_SANDBOX=1 is the escape hatch for hosts without user namespaces). Only GET is served, images, media and fonts are not loaded, and the number of requests
 and bytes per page is capped. The app calls it with a shared token (FETCHER_TOKEN)."""
 import hmac
 import os
@@ -40,8 +41,15 @@ def render(url):
     spent = {'n': 0, 'bytes': 0}
     with sync_playwright() as p:
         # a proxy that goes nowhere, with no bypass even for loopback: whatever the interception below does not answer (a WebSocket, a prefetch) fails
-        args = ['--proxy-server=http://127.0.0.1:9', '--proxy-bypass-list=<-loopback>', '--disable-dev-shm-usage'] + (['--no-sandbox'] if os.environ.get('FETCH_NO_SANDBOX') else [])
-        browser = p.chromium.launch(args=args)
+        args = ['--proxy-server=http://127.0.0.1:9', '--proxy-bypass-list=<-loopback>', '--disable-dev-shm-usage']
+        sandbox = not os.environ.get('FETCH_NO_SANDBOX')            # Playwright starts Chromium WITHOUT its sandbox unless asked: ask
+        try:
+            browser = p.chromium.launch(args=args, chromium_sandbox=sandbox)
+        except Exception as e:
+            if os.environ.get('FETCH_NO_SANDBOX'):
+                raise
+            raise RuntimeError('the browser could not start inside its sandbox. Run the container with the seccomp profile of docker-compose.fetcher.yml '
+                               '(fetcher-seccomp.json); on a host without user namespaces, set FETCH_NO_SANDBOX=1') from e
         try:
             ctx = browser.new_context(service_workers='block', accept_downloads=False, java_script_enabled=True, user_agent=netguard.USER_AGENT)
 
@@ -83,6 +91,11 @@ def render_endpoint(req: Req, x_fetch_token: str = Header(default='')):
             return render(req.url)
         except netguard.Refused as e:
             raise HTTPException(422, str(e))
+        except RuntimeError as e:
+            if 'sandbox' in str(e):
+                print('fetcher:', e, flush=True)
+                raise HTTPException(502, str(e))
+            raise HTTPException(502, 'the page could not be rendered (RuntimeError)')
         except Exception as e:
             raise HTTPException(502, f'the page could not be rendered ({type(e).__name__})')
 

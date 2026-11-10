@@ -11,6 +11,7 @@ os.environ['DATA_DIR'] = FILES                                     # the Library
 os.environ['SERVICE_ROLE'] = 'api'                                  # tests run jobs themselves, no background workers
 for _k, _v in (('RATE_PER_S', '100000'), ('RATE_BURST', '100000'), ('LOGIN_PER_MIN', '100000'), ('ALFRED_PER_MIN', '100000'), ('INGEST_PER_MIN', '100000')):
     os.environ.setdefault(_k, _v)                                 # the suite is one fast client: the limits get their own tests
+os.environ['SECRET_KEY'] = 'test-only-secret-key-0123456789abcdef-0123456789'   # the app refuses to start without a real one
 os.environ['INITIAL_ADMIN_USERNAME'] = 'admin'                    # the suite's own first admin, whatever a local .env says
 os.environ['INITIAL_ADMIN_PASSWORD'] = 'test-admin-password-12345'
 os.environ.setdefault('EMBEDDING_PROVIDER', 'openrouter')        # no embedding model is downloaded: tests that need vectors fake them

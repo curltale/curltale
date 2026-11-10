@@ -18,6 +18,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://studio_app:${APP_DB_PASSWORD}@db:5432/studio
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
     command: ["python", "-m", "studio.worker"]
     networks: [default, fetch]
     volumes:

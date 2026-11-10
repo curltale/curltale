@@ -20,6 +20,7 @@ Licences were read from the installed packages' metadata and the pinned lock fil
 | Playwright's bundled Chromium (fetcher sidecar) | BSD-style plus third-party notices | OK; ship as a separate optional image |
 | Image `pgvector/pgvector` (Postgres + pgvector) | PostgreSQL licence | OK |
 | Playwright (Python package and the `mcr.microsoft.com/playwright/python` image used for the optional browser container; Chromium inside) | Apache-2.0; Chromium BSD-3 plus third-party notices; Ubuntu base | OK; separate optional image, nothing in the main image |
+| `fetcher-seccomp.json` (the seccomp profile of the browser container: Docker's default profile plus user namespaces, copied from Playwright's `utils/docker/seccomp_profile.json`) | Apache-2.0 | OK; unmodified copy |
 | MinIO | **AGPL-3.0** | Never bundled or required. S3 is configured as an endpoint; an example for MinIO may be documented as a user's own choice |
 | LiteLLM | MIT (core) | Never required; any OpenAI-compatible endpoint works |
 | Embedding model `BAAI/bge-base-en-v1.5` | MIT | OK. A chosen external or multilingual model brings its own licence; Manage shows it |

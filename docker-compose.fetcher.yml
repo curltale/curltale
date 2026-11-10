@@ -18,11 +18,13 @@ services:
     environment:
       FETCHER_TOKEN: ${FETCHER_TOKEN:?set FETCHER_TOKEN in .env}
       FETCH_ALLOWED_HOSTS: ${FETCH_ALLOWED_HOSTS:-}
+      FETCH_NO_SANDBOX: ${FETCH_NO_SANDBOX:-}                  # leave empty. 1 = run Chromium without its sandbox (only for a host that has user namespaces switched off)
     networks: [fetch]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
+    cap_add: [SYS_CHROOT]                                    # only as a ceiling: the process runs as a plain user and holds no capability; Chromium's sandbox needs chroot inside its own namespace
+    security_opt: ["no-new-privileges:true", "seccomp=./fetcher-seccomp.json"]   # Docker's default profile plus user namespaces, which Chromium's own sandbox needs
     pids_limit: 256
     mem_limit: 1g
 

@@ -21,11 +21,46 @@ SYSTEM_SCHEMAS = ('pg_catalog', 'information_schema')
 DEFAULT_OPTIONS = {'statement_timeout_ms': 15000, 'row_limit': 500, 'agents_may_read_rows': True}
 SSL_MODES = ('disable', 'prefer', 'require', 'verify-ca', 'verify-full')
 FILES_DIR = os.path.realpath(os.environ.get('CONNECTOR_FILES_DIR', '/app/data'))           # file databases (SQLite, DuckDB) must live under here
-BASE_FORBIDDEN = r'(load_extension|readfile|writefile|lo_|dblink|set_config|current_setting|getsetting|query_to_|database_to_|schema_to_|table_to_|cursor_to_|txid_|version|current_user|session_user|' \
-                 r'current_database|current_schema|currentuser|currentdatabase|hostname|inet_|has_\w+_privilege|obj_description|col_description|format_type|to_regclass|copy|pg_\w*|' \
-                 r'load_file|sleep|benchmark|get_lock|release_lock|sys_exec|sys_eval|user|database|schema|connection_id|' \
-                 r'file|url|s3|s3cluster|hdfs|remote|remotesecure|cluster|clusterallreplicas|mysql|postgresql|jdbc|odbc|mongodb|redis|executable|input|dictget\w*|' \
-                 r'read_\w+|glob|duckdb_\w+|pragma_\w+|sniff_csv|parquet_\w+|which_secret|getenv)'
+# Functions that must never be callable, whatever the database: they read files, the network, the server's settings or its catalog, change something,
+# or RUN SQL OF THEIR OWN (query_to_xml, ts_stat...), which would step around every column check. The first list is prefixes, the second exact names.
+_FORBIDDEN_PREFIXES = ('lo_', 'dblink', 'query_to_', 'database_to_', 'schema_to_', 'table_to_', 'cursor_to_', 'txid_', 'inet_', 'pg_', 'crosstab', 'xpath_table',
+                       'ts_stat', 'ts_rewrite', 'dictget', 'read_', 'duckdb_', 'pragma_', 'parquet_', 'sqlite_')
+_FORBIDDEN_NAMES = ('load_extension', 'readfile', 'writefile', 'set_config', 'current_setting', 'getsetting', 'version', 'current_user', 'session_user', 'current_role', 'current_catalog',
+                    'current_database', 'current_schema', 'current_schemas', 'current_query', 'currentuser', 'currentdatabase', 'hostname', 'obj_description', 'col_description',
+                    'shobj_description', 'format_type', 'to_regclass', 'to_regproc', 'to_regtype', 'copy', 'nextval', 'setval', 'currval', 'lastval',
+                    'load_file', 'sleep', 'benchmark', 'get_lock', 'release_lock', 'is_free_lock', 'sys_exec', 'sys_eval', 'user', 'system_user', 'database', 'schema', 'connection_id',
+                    'file', 'url', 's3', 's3cluster', 'hdfs', 'remote', 'remotesecure', 'cluster', 'clusterallreplicas', 'mysql', 'postgresql', 'jdbc', 'odbc', 'mongodb', 'redis',
+                    'executable', 'input', 'glob', 'sniff_csv', 'which_secret', 'getenv', 'query', 'query_table', 'getvariable', 'currentquery', 'queryid', 'initialqueryid',
+                    'columns', 'unpack')                 # DuckDB / ClickHouse COLUMNS('regex'): every column of the row without naming one
+BASE_FORBIDDEN = '(?:' + '|'.join([p + r'\w*' for p in _FORBIDDEN_PREFIXES] + list(_FORBIDDEN_NAMES) + [r'has_\w+_privilege']) + ')'
+
+# The SQL parser knows the standard functions by name (COUNT, COALESCE, DATE_TRUNC...): those pass unless forbidden above. A function it does NOT know is
+# refused unless it is on this list of functions that only compute from their arguments: a list of what is allowed, because a list of what is forbidden always misses one.
+_SAFE = """
+abs ceil ceiling floor round trunc truncate mod power pow sqrt cbrt exp ln log log2 log10 sign pi degrees radians sin cos tan asin acos atan atan2 random rand
+greatest least width_bucket div gcd lcm
+length char_length character_length octet_length bit_length lower upper lcase ucase initcap trim ltrim rtrim btrim lpad rpad left right substr substring mid replace translate reverse
+repeat space concat concat_ws split_part strpos position instr locate starts_with ends_with ascii chr char format to_hex hex unhex md5 regexp_replace regexp_match regexp_like
+regexp_substr regexp_count regexp_instr regexp_extract string_to_array array_to_string overlay strcmp field elt find_in_set substring_index
+coalesce nullif ifnull isnull nvl nvl2 if iif zeroifnull nullifzero
+now date_trunc date_part age make_date make_time make_timestamp make_timestamptz make_interval to_char to_date to_timestamp to_number justify_days justify_hours justify_interval
+date_add date_sub datediff date_diff timestampdiff timestampadd dateadd adddate subdate date_format str_to_date year month day hour minute second quarter week weekday dayofweek
+dayofmonth dayofyear dayname monthname last_day curdate curtime utc_date utc_time utc_timestamp unix_timestamp from_unixtime strftime date time datetime julianday unixepoch epoch
+epoch_ms today yesterday isfinite timezone
+count sum avg min max stddev stddev_pop stddev_samp variance var_pop var_samp corr covar_pop covar_samp bool_and bool_or every bit_and bit_or bit_xor string_agg array_agg json_agg jsonb_agg
+json_object_agg jsonb_object_agg percentile_cont percentile_disc mode median group_concat listagg any_value approx_count_distinct quantile first last total uniq uniqexact
+row_number rank dense_rank percent_rank cume_dist ntile lag lead first_value last_value nth_value
+array_length cardinality array_position array_cat array_append array_prepend array_remove array_upper array_lower
+json_extract json_extract_path json_extract_path_text jsonb_extract_path jsonb_extract_path_text json_array_length jsonb_array_length json_typeof jsonb_typeof json_build_object
+jsonb_build_object json_build_array jsonb_build_array to_json to_jsonb row_to_json json_object json_array json_value json_query json_unquote json_valid json_extract_string
+jsonb_pretty json_strip_nulls jsonb_strip_nulls
+num_nonnulls num_nulls typeof multiif row
+""".split()
+# ClickHouse spells conversions and date parts as toX(...) and conditional aggregates as xIf(...)
+_SAFE_PATTERNS = (r'to(?:start|date|year|month|day|hour|minute|second|int|uint|float|decimal|string|yyyymm|relative|monday|week|quarter|interval|time|unix|iso)\w*',
+                  r'(?:count|sum|avg|min|max|any|uniq|uniqexact)if', r'format(?:datetime|row)', r'datename')
+_EXTRA = [x.strip().lower() for x in os.environ.get('SQL_ALLOWED_FUNCTIONS', '').split(',') if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', x.strip())]   # an operator's own safe functions (.env only)
+BASE_ALLOWED = '(?:' + '|'.join(sorted(set(_SAFE) | set(_EXTRA)) + list(_SAFE_PATTERNS)) + ')'
 
 
 def mask_salt():
@@ -54,6 +89,7 @@ class Driver:
     qchar = '"'
     file_based = False
     forbidden = re.compile('^' + BASE_FORBIDDEN + '$', re.I)
+    allowed = re.compile('^' + BASE_ALLOWED + '$', re.I)                  # functions the SQL parser does not know by name: only these may be called
     hash_tpl = ''                                                    # SQL in this dialect: __c__ is the column, __salt__ the salt
     fields = ('host', 'port', 'database', 'user', 'password', 'sslmode', 'schemas')      # what the UI asks for
 

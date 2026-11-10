@@ -3,11 +3,12 @@ in its own container (set SERVICE_ROLE=api and LIBRARY_WORKERS=0 on the web one,
 import signal
 import threading
 import time
-from . import db
+from . import config, db
 from .library import jobs
 
 
 def main():
+    config.require_secrets()
     for _ in range(60):                                                 # the database may still be starting
         try:
             db.init_schema()

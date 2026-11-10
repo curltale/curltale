@@ -30,6 +30,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://studio_app:${APP_DB_PASSWORD}@db:5432/studio   # the least-privileged app account, not the superuser
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env (openssl rand -hex 32)}   # no default: the app refuses to start with a missing, short or placeholder key
     ports:
       # localhost only by default: put a proxy with TLS in front. To expose it directly set HTTP_BIND=0.0.0.0 (and CLIENT_IP_HEADER= in .env).
       - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8080}:8000"
