@@ -293,7 +293,7 @@ def surgical_rewrite(cid, tid, superseded, current_sid=None):
     msgs = [{'role': 'system', 'content': (PROMPTS / 'topic_surgical.md').read_text()},
             {'role': 'user', 'content': f'Current topic page:\n\n{md}\n\n---\n\nClaims that are no longer attributed to any remaining source and must be reviewed:\n\n{block}'}]
     text, _ = llm.chat_tools(msgs, WRITER_TOOLS, TopicWriterTools(cid, current_sid), role='topic_writer', max_rounds=12, max_tokens=12000, temperature=0)
-    out = (text or '').strip().lstrip('﻿')
+    out = wiki._strip_preamble((text or '').strip().lstrip('﻿'))     # a model may explain its decision before the page: keep the page
     return out if out.startswith('#') else None
 
 

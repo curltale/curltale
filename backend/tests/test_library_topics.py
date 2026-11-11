@@ -31,6 +31,7 @@ class TopicFake(Fake):
         super().__init__([PASS], pages=[PAGE], **kw)
         self.analyses, self.searches, self.writer_inputs, self.writer_tool_results, self.surgical_inputs = list(analyses), [], [], [], []
         self.writer_tools = list(writer_tools)
+        self.surgical_preamble = ''
 
     def chat_tools(self, messages, tools, run_tool, role='assistant', **kw):
         if role == 'analyzer':
@@ -43,7 +44,7 @@ class TopicFake(Fake):
                 self.surgical_inputs.append(user)
                 page = user.split('Current topic page:\n\n', 1)[1].split('\n\n---\n\n', 1)[0]
                 gone = re.findall(r'- claim: (.+)', user)
-                return '\n'.join(l for l in page.splitlines() if not any(g in l for g in gone)), 0
+                return self.surgical_preamble + '\n'.join(l for l in page.splitlines() if not any(g in l for g in gone)), 0
             self.writer_inputs.append(user)
             for name, args in self.writer_tools:
                 self.writer_tool_results.append(json.loads(run_tool(name, args)))
@@ -265,3 +266,24 @@ def test_deleting_a_source_keeps_its_quotes_for_the_lint_pass_which_rewrites_sur
     assert f.surgical_inputs and 'A monthly plan ends with the billing period.' in f.surgical_inputs[-1] and 'quote: Monthly plans' in f.surgical_inputs[-1]
     t = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()
     assert 'monthly plan' not in t['markdown'].lower() and 'yearly plan' in t['markdown'].lower() and t['topic']['needs_revision'] is False
+
+
+def test_the_surgical_rewrite_keeps_the_page_when_the_writer_explains_itself_first(client, world, tfake):
+    """Models sometimes write a sentence about their decision before the page; the revision must still be published, without that sentence."""
+    a = world['a']['id']
+    only_one = dict(REFUNDS, links=[], claims=[REFUNDS['claims'][1]])
+    both = dict(REFUNDS, action='update', existing_slug='refund-policy', links=[], claims=[REFUNDS['claims'][0]])
+    f = tfake([analysis(only_one), analysis(both)])
+    f.surgical_preamble = "The yearly-plan passage is still supported by another source, so I am leaving it unchanged.\n\n"
+    _as(client, 'ann'); one = _upload(client, a, 'one.md', DOC).json()['id']
+    _run()
+    _upload(client, a, 'two.md', DOC + b' Another file.')
+    _run()
+    assert client.delete(f'/api/library/collections/{a}/sources/{one}').status_code == 200
+    _run()
+    assert f.surgical_inputs
+    t = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()
+    assert t['markdown'].startswith('#') and 'leaving it unchanged' not in t['markdown'] and 'monthly plan' not in t['markdown'].lower()
+    assert t['topic']['needs_revision'] is False
+    with db.conn() as c:
+        assert not c.execute("SELECT 1 FROM library.job WHERE kind='topic.revise' AND status='failed'").fetchone()

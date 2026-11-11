@@ -2,6 +2,11 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [0.2.3] - 2026-11-11
+
+### Fixed
+- A topic page is revised even when the AI model writes a short note before the page. Such revisions used to fail with "the writer did not return a page", leaving the topic on its previous version and flagged for revision.
+
 ## [0.2.2] - 2026-11-11
 
 ### Added
