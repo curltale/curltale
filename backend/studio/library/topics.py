@@ -283,17 +283,21 @@ def write_topic_markdown(cid, sid, topic, source_markdown, existing_markdown='',
     return md if md.startswith('#') else _fallback_page(topic, sid)
 
 
-def surgical_rewrite(cid, tid, superseded, current_sid=None):
+def surgical_rewrite(cid, tid, superseded, current_sid=None, missing_sources=()):
     """The surgical rewrite: audit each withdrawn claim against the remaining sources (with tools) and remove or soften only the passages
-    nothing else supports. -> the revised page, or None when the writer did not return a Markdown page."""
+    nothing else supports. Sources the page still cites but that no longer exist (removed, or replaced by a newer upload) are named, so that what
+    rests only on them goes too. -> the revised page, or None when the writer did not return a Markdown page."""
     md = current_markdown(tid)
-    if not md or not superseded:
+    if not md or not (superseded or missing_sources):
         return None
-    block = '\n'.join(f"- claim: {c['text']}\n  quote: {c.get('quote') or '(no quote)'}" for c in superseded)
-    msgs = [{'role': 'system', 'content': (PROMPTS / 'topic_surgical.md').read_text()},
-            {'role': 'user', 'content': f'Current topic page:\n\n{md}\n\n---\n\nClaims that are no longer attributed to any remaining source and must be reviewed:\n\n{block}'}]
+    block = '\n'.join(f"- claim: {c['text']}\n  quote: {c.get('quote') or '(no quote)'}" for c in superseded) or '(none)'
+    user = f'Current topic page:\n\n{md}\n\n---\n\nClaims that are no longer attributed to any remaining source and must be reviewed:\n\n{block}'
+    if missing_sources:
+        user += ('\n\n---\n\nSources cited on this page that no longer exist (removed, or replaced by a newer upload):\n\n'
+                 + '\n'.join(f'- `[source: {s}]`' for s in missing_sources))
+    msgs = [{'role': 'system', 'content': (PROMPTS / 'topic_surgical.md').read_text()}, {'role': 'user', 'content': user}]
     text, _ = llm.chat_tools(msgs, WRITER_TOOLS, TopicWriterTools(cid, current_sid), role='topic_writer', max_rounds=12, max_tokens=12000, temperature=0)
-    out = wiki._strip_preamble((text or '').strip().lstrip('﻿'))     # a model may explain its decision before the page: keep the page
+    out = wiki._strip_preamble((text or '').strip().lstrip('\ufeff'))     # a model may explain its decision before the page: keep the page
     return out if out.startswith('#') else None
 
 
@@ -626,9 +630,22 @@ def merge(cid, from_id, into_id, user, reason='merged'):
 
 
 # ---------------------------------------------------------------- revising pages after a source is gone
+CITATION = re.compile(r'\[source:\s*([0-9a-fA-F-]{36})\s*\]')
+
+
+def missing_citations(c, cid, markdown):
+    """Source ids the page cites that are not (any more) in the collection."""
+    cited = sorted(set(CITATION.findall(markdown or '')))
+    if not cited:
+        return []
+    alive = {str(r['id']) for r in c.execute('SELECT id FROM library.source WHERE collection_id=%s AND id::text = ANY(%s)', (cid, cited)).fetchall()}
+    return [s for s in cited if s not in alive]
+
+
 def revise(cid, tid):
-    """The lint pass: claims superseded since the page was last published are audited by a surgical rewrite against
-    the remaining sources. A topic with no source left is archived."""
+    """The lint pass: claims superseded since the page was last published are audited by a surgical rewrite against the remaining sources. A page
+    that still cites sources which no longer exist is revised too, with every withdrawn claim that has no remaining source (an earlier rewrite may
+    have carried such a passage over). A topic with no source left is archived."""
     with conn() as c:
         t = c.execute('SELECT * FROM library.topic WHERE id=%s AND collection_id=%s', (tid, cid)).fetchone()
         if not t or t['status'] != 'active':
@@ -636,13 +653,16 @@ def revise(cid, tid):
         if not c.execute('SELECT 1 FROM library.topic_source WHERE topic_id=%s', (tid,)).fetchone():
             c.execute("UPDATE library.topic SET status='archived', needs_revision=false, updated_at=now() WHERE id=%s", (tid,))
             return 'archived'
+        missing = missing_citations(c, cid, current_markdown(tid))
         since = c.execute("SELECT max(created_at) AS at FROM library.topic_version WHERE topic_id=%s AND status='published'", (tid,)).fetchone()['at']
+        orphan = ("NOT EXISTS (SELECT 1 FROM library.claim_source o JOIN library.source s ON s.id=o.source_id WHERE o.claim_id=cl.id)" if missing else 'false')
         gone = c.execute("SELECT cl.n, cl.text, (SELECT cs.quote FROM library.claim_source cs WHERE cs.claim_id=cl.id ORDER BY cs.id DESC LIMIT 1) AS quote FROM library.claim cl "
-                         "WHERE cl.topic_id=%s AND cl.status='superseded' AND (%s::timestamptz IS NULL OR cl.superseded_at > %s) ORDER BY cl.n", (tid, since, since)).fetchall()
-        if not gone:
+                         f"WHERE cl.topic_id=%s AND cl.status='superseded' AND (%s::timestamptz IS NULL OR cl.superseded_at > %s OR {orphan}) "
+                         "ORDER BY cl.superseded_at DESC, cl.n LIMIT 60", (tid, since, since)).fetchall()
+        if not gone and not missing:
             c.execute('UPDATE library.topic SET needs_revision=false WHERE id=%s', (tid,))
             return 'unchanged'
-    new = surgical_rewrite(cid, tid, [dict(g) for g in gone])
+    new = surgical_rewrite(cid, tid, sorted((dict(g) for g in gone), key=lambda g: g['n']), missing_sources=missing)
     if not new:
         raise RuntimeError('the writer did not return a page when asked to revise it')
     store_version(cid, tid, new, 'Lint pass: revised after a contributing source was removed or replaced')

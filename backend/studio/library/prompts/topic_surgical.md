@@ -39,8 +39,15 @@ Fetch the full current Markdown of an existing topic page.
    Do not invent replacement content.
 6. Do not touch any passage that is unrelated to the removed claims.
 7. If a section becomes empty after removals, remove its heading too.
-8. If every removed claim is still supported elsewhere, return the page unchanged.
-9. Output the complete revised topic page in Markdown — no fences, no prose before
+8. If the input lists sources that no longer exist, every `[source: <id>]` citation of
+   them must go. A passage cited only to them stays only if another remaining source
+   still supports it (then cite that source instead, or leave it uncited); otherwise
+   remove or soften it as in step 5. Remove their entries from any list of sources.
+   A statement that a newer source contradicts an older one is resolved in favour of
+   the remaining source when the older one no longer exists.
+9. If every removed claim is still supported elsewhere and no listed source is cited,
+   return the page unchanged.
+10. Output the complete revised topic page in Markdown — no fences, no prose before
    the opening heading.
 
 ---

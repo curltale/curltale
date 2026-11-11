@@ -44,6 +44,7 @@ class TopicFake(Fake):
                 self.surgical_inputs.append(user)
                 page = user.split('Current topic page:\n\n', 1)[1].split('\n\n---\n\n', 1)[0]
                 gone = re.findall(r'- claim: (.+)', user)
+                gone += [f'[source: {m}]' for m in re.findall(r'^- `\[source: ([0-9a-f-]{36})\]`$', user.split('no longer exist', 1)[1], re.M)] if 'no longer exist' in user else []
                 return self.surgical_preamble + '\n'.join(l for l in page.splitlines() if not any(g in l for g in gone)), 0
             self.writer_inputs.append(user)
             for name, args in self.writer_tools:
@@ -287,3 +288,45 @@ def test_the_surgical_rewrite_keeps_the_page_when_the_writer_explains_itself_fir
     assert t['topic']['needs_revision'] is False
     with db.conn() as c:
         assert not c.execute("SELECT 1 FROM library.job WHERE kind='topic.revise' AND status='failed'").fetchone()
+
+
+def test_a_page_still_citing_a_removed_source_is_revised_with_the_claims_withdrawn_before_the_last_publish(client, world, tfake):
+    """A later rewrite carried over a passage from a source that has since been replaced. The lint pass names the missing source, includes the
+    withdrawn claim even though it was withdrawn before the last publish, and the passage goes."""
+    a = world['a']['id']
+    only_one = dict(REFUNDS, links=[], claims=[REFUNDS['claims'][1]])
+    both = dict(REFUNDS, action='update', existing_slug='refund-policy', links=[], claims=[REFUNDS['claims'][0]])
+    f = tfake([analysis(only_one), analysis(both)])
+    _as(client, 'ann'); one = _upload(client, a, 'one.md', DOC).json()['id']
+    _run()
+    _upload(client, a, 'two.md', DOC + b' Another file.')
+    _run()
+    assert client.delete(f'/api/library/collections/{a}/sources/{one}').status_code == 200
+    _run()                                                                                                   # the ordinary lint pass
+    t = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()
+    stale = t['markdown'].rstrip() + f"\n\n- Legacy: the old file said monthly plans end early. `[source: {one}]`\n"
+    with db.conn() as c:                                                                                     # a later rewrite brought the old passage back
+        tid = c.execute("SELECT id, collection_id FROM library.topic WHERE slug='refund-policy'").fetchone()
+    topics.store_version(tid['collection_id'], tid['id'], stale, 'a later rewrite')
+    n = len(f.surgical_inputs)
+    assert client.post(f'/api/library/collections/{a}/topics/refund-policy/revise').status_code == 200
+    _run()
+    assert len(f.surgical_inputs) == n + 1
+    sent = f.surgical_inputs[-1]
+    assert f'- `[source: {one}]`' in sent.split('no longer exist', 1)[1]                                   # the missing source is named
+    assert 'A monthly plan ends with the billing period.' in sent                                             # withdrawn before the last publish, still offered
+    t = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()
+    assert one not in t['markdown'] and 'Legacy' not in t['markdown'] and 'yearly plan' in t['markdown'].lower()
+    assert t['topic']['needs_revision'] is False
+
+
+def test_a_page_whose_citations_all_exist_and_nothing_new_is_withdrawn_is_left_alone(client, world, tfake):
+    a = world['a']['id']
+    f = tfake([analysis(dict(REFUNDS, links=[]))])
+    _as(client, 'ann'); _upload(client, a, 'one.md', DOC)
+    _run()
+    before = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()['markdown']
+    assert client.post(f'/api/library/collections/{a}/topics/refund-policy/revise').status_code == 200
+    _run()
+    assert not f.surgical_inputs
+    assert client.get(f'/api/library/collections/{a}/topics/refund-policy').json()['markdown'] == before

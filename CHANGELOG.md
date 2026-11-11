@@ -2,6 +2,11 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [0.2.4] - 2026-11-11
+
+### Fixed
+- Topic pages no longer keep statements from a document that has been removed or replaced by a newer upload. When a page still cites such a document, the revision pass reviews every withdrawn statement it may rest on, not only the most recent ones, and the writer is told which cited documents no longer exist. *Revise* on a topic now also cleans up pages in this state.
+
 ## [0.2.3] - 2026-11-11
 
 ### Fixed
