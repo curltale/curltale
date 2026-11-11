@@ -26,7 +26,11 @@ export default function AdminPage() {
   const { user, status, refresh } = useStudio()
   const admin = user.role === 'admin'
   const [tokens, setTokens] = useState([]), [users, setUsers] = useState([])
-  const [tname, setTname] = useState(''), [tent, setTent] = useState(DEF_ENT), [newTok, setNewTok] = useState(''), [nu, setNu] = useState({ username: '', password: '', role: 'modeller', extra_roles: [], entitlements: DEF_USER })
+  const [tname, setTname] = useState(''), [tent, setTent] = useState(DEF_ENT), [newTok, setNewTok] = useState(''), [nu, setNu] = useState({ username: '', password: '', role: 'modeller', extra_roles: [], entitlements: DEF_USER }), [rp, setRp] = useState(null)      // rp: the password reset in progress { username, custom, result }
+  const userAct = async (fn) => { try { await fn(); load() } catch (x) { alert(x.message) } }
+  const resetPw = async () => {
+    try { const r = await api.post(`/api/admin/users/${rp.username}/password`, rp.custom ? { password: rp.custom } : {}); setRp({ ...rp, result: r.password }); load() } catch (x) { alert(x.message) }
+  }
   const load = () => {
     if (admin) {
       api.get('/api/admin/tokens').then((t) => setTokens(t.map((x) => ({ ...x, entitlements: { ...DEF_ENT, ...(x.entitlements || {}) } }))))
@@ -68,16 +72,34 @@ export default function AdminPage() {
       </>}
 
       {tab === 'users' && admin && <><h2>Users</h2><div className="card">
-        <p className="small muted" style={{ marginTop: 0 }}>A user's entitlements apply to what Alfred can see when that user chats with it. Editing the model in the UI is not affected.</p>
-        <table><thead><tr><th>User</th><th>Role</th><th>Alfred may see</th></tr></thead><tbody>{users.map((u) => <tr key={u.username}><td>{u.username}</td><td>{u.username === user.username ? <Pill>{u.role}</Pill> : <select style={{ width: 120 }} value={u.role} onChange={async (e) => { try { await api.put(`/api/admin/users/${u.username}/roles`, { role: e.target.value, extra_roles: u.extra_roles }); load() } catch (x) { alert(x.message) } }}>{['viewer', 'modeller', 'publisher', 'admin'].map((r) => <option key={r}>{r}</option>)}</select>} <label className="small" title="may ingest, edit and approve documents in the collections where granted write"><input type="checkbox" style={{ width: 'auto' }} checked={u.extra_roles.includes('editor') || u.role === 'admin'} disabled={u.role === 'admin'} onChange={async (e) => { await api.put(`/api/admin/users/${u.username}/roles`, { role: u.role, extra_roles: e.target.checked ? ['editor'] : [] }); load() }} /> editor</label>{u.must_change && <> <Pill tone="warn">must change password</Pill></>}</td>
-          <td><Ent value={u.entitlements} onChange={async (e) => { if (e.restricted && !u.entitlements.restricted && !confirm(`Allow Alfred to show restricted identity data definitions to ${u.username}?`)) return; await api.put(`/api/admin/users/${u.username}/entitlements`, { entitlements: e }); load() }} /></td></tr>)}</tbody></table>
+        <p className="small muted" style={{ marginTop: 0 }}>A user's entitlements apply to what Alfred can see when that user chats with it. Editing the model in the UI is not affected. A user who forgot their password gets a temporary one from <em>Reset password</em>; leavers are disabled (their grants and history stay) and can then be deleted. If nobody can sign in, an administrator with access to the server runs <code>python -m studio.passwd &lt;username&gt;</code> in the app container.</p>
+        <table><thead><tr><th>User</th><th>Role</th><th>Alfred may see</th><th>Account</th></tr></thead><tbody>{users.map((u) => <tr key={u.username} style={u.disabled ? { opacity: .6 } : undefined}><td>{u.username}{u.disabled && <> <Pill tone="bad">disabled</Pill></>}</td><td>{u.username === user.username ? <Pill>{u.role}</Pill> : <select style={{ width: 120 }} value={u.role} onChange={async (e) => { try { await api.put(`/api/admin/users/${u.username}/roles`, { role: e.target.value, extra_roles: u.extra_roles }); load() } catch (x) { alert(x.message) } }}>{['viewer', 'modeller', 'publisher', 'admin'].map((r) => <option key={r}>{r}</option>)}</select>} <label className="small" title="may ingest, edit and approve documents in the collections where granted write"><input type="checkbox" style={{ width: 'auto' }} checked={u.extra_roles.includes('editor') || u.role === 'admin'} disabled={u.role === 'admin'} onChange={async (e) => { await api.put(`/api/admin/users/${u.username}/roles`, { role: u.role, extra_roles: e.target.checked ? ['editor'] : [] }); load() }} /> editor</label>{u.must_change && <> <Pill tone="warn">must change password</Pill></>}</td>
+          <td><Ent value={u.entitlements} onChange={async (e) => { if (e.restricted && !u.entitlements.restricted && !confirm(`Allow Alfred to show restricted identity data definitions to ${u.username}?`)) return; await api.put(`/api/admin/users/${u.username}/entitlements`, { entitlements: e }); load() }} /></td>
+          <td style={{ whiteSpace: 'nowrap' }}>{u.username === user.username ? <span className="muted small">you</span> : <>
+            <button className="btn small" title="Give this user a new temporary password. They must choose their own at the next sign-in." onClick={() => setRp({ username: u.username, custom: '', result: null })}>Reset password</button>{' '}
+            <button className="btn small" title={u.disabled ? 'Let this user sign in again' : 'Stop this user from signing in. Their grants and history stay.'} onClick={() => userAct(() => api.put(`/api/admin/users/${u.username}/disabled`, { disabled: !u.disabled }))}>{u.disabled ? 'Enable' : 'Disable'}</button>
+            {u.disabled && <>{' '}<button className="btn small danger" title="Delete this account for good. Their collection grants go with it." onClick={() => { if (confirm(`Delete ${u.username} for good? Their collection grants are removed too. The audit log keeps their name.`)) userAct(() => api.del(`/api/admin/users/${u.username}`)) }}>Delete</button></>}</>}</td></tr>)}</tbody></table>
+        {rp && <div className="card" style={{ marginTop: 10, borderColor: 'var(--accent)' }}>
+          {!rp.result ? <>
+            <strong>Reset the password of {rp.username}</strong>
+            <p className="small muted" style={{ margin: '4px 0 8px' }}>No email is sent: you hand the temporary password to the user yourself. It is shown once. Their sessions end and they must choose their own password at the next sign-in.</p>
+            <div className="row"><input style={{ width: 280 }} type="password" autoComplete="new-password" placeholder="leave empty to generate a strong one" value={rp.custom} onChange={(e) => setRp({ ...rp, custom: e.target.value })} />
+              <button className="btn primary" onClick={resetPw}>{rp.custom ? 'Set this password' : 'Generate and set'}</button><button className="btn" onClick={() => setRp(null)}>Cancel</button></div>
+          </> : <>
+            <strong>Temporary password for {rp.username}</strong>
+            <div className="row" style={{ margin: '8px 0' }}><code style={{ fontSize: 16, padding: '6px 10px' }}>{rp.result}</code>
+              <button className="btn" onClick={() => navigator.clipboard?.writeText(rp.result)}>Copy</button></div>
+            <p className="small muted" style={{ margin: 0 }}>Shown once: it cannot be looked up again. Hand it over by your own channel. {rp.username} is asked to choose a new password when they sign in.</p>
+            <div className="row" style={{ justifyContent: 'flex-end' }}><button className="btn primary" onClick={() => setRp(null)}>Done</button></div>
+          </>}
+        </div>}
         <div className="row" style={{ marginTop: 10 }}>
           <input style={{ width: 160 }} placeholder="username" value={nu.username} onChange={(e) => setNu({ ...nu, username: e.target.value })} />
           <input style={{ width: 180 }} type="password" placeholder="password (12+)" value={nu.password} onChange={(e) => setNu({ ...nu, password: e.target.value })} />
           <select style={{ width: 130 }} value={nu.role} onChange={(e) => setNu({ ...nu, role: e.target.value })} title="viewer reads · modeller edits drafts · publisher publishes · admin manages. Editor (tick) is separate: documents."><option>viewer</option><option>modeller</option><option>publisher</option><option>admin</option></select>
           <label className="small" title="may ingest, edit and approve documents"><input type="checkbox" style={{ width: 'auto' }} checked={nu.extra_roles.includes('editor')} onChange={(e) => setNu({ ...nu, extra_roles: e.target.checked ? ['editor'] : [] })} /> editor</label>
           <Ent value={nu.entitlements} onChange={(e) => setNu({ ...nu, entitlements: e })} />
-          <button className="btn primary" onClick={async () => { try { await api.post('/api/admin/users', nu); setNu({ username: '', password: '', role: 'modeller', extra_roles: [], entitlements: DEF_USER }); load() } catch (e) { alert(e.message) } }}>Add / update user</button></div></div></>}
+          <button className="btn primary" onClick={async () => { try { await api.post('/api/admin/users', nu); setNu({ username: '', password: '', role: 'modeller', extra_roles: [], entitlements: DEF_USER }); load() } catch (e) { alert(e.message) } }}>Add user</button></div></div></>}
 
     </>
   )

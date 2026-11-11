@@ -2,6 +2,16 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [0.2.2] - 2026-11-11
+
+### Added
+- **Account administration, with no email service.** On **Users & access > Users** an administrator can **reset a password** (give one, or have a strong temporary one generated; it is shown once, the user's sessions end and they choose their own at the next sign-in), **disable** and re-enable an account (it cannot sign in, its grants and history stay), and **delete** a disabled account (refused while the user is the only manager of a collection). The last administrator who can sign in cannot be disabled, deleted or demoted.
+- **`python -m studio.passwd`**, to run in the app container (`docker compose exec app python -m studio.passwd <username>`): a way back in when nobody can sign in. It prints a new temporary password and enables the account if it was disabled; `--list` shows the users. Each use is written to the audit log.
+- The audit log records user administration (create, reset, disable, enable, delete) and the deletion of a token. Passwords are never recorded.
+
+### Changed
+- Adding a user whose name already exists is refused (HTTP 409) instead of silently replacing that account. The button reads *Add user*.
+
 ## [0.2.1] - 2026-11-10
 
 ### Security

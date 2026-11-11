@@ -55,7 +55,7 @@ def login(username, password, ip=None):
             c.execute('INSERT INTO login_attempt (username,ip,ok) VALUES (%s,%s,false)', (username, ip))
             raise LoginBlocked(f'too many failed attempts: try again in {LOCK_MINUTES} minutes')
         u = c.execute('SELECT * FROM app_user WHERE username=%s', (username,)).fetchone()
-        ok = check_password(password, u['password_hash'] if u else _DUMMY) and u is not None
+        ok = check_password(password, u['password_hash'] if u else _DUMMY) and u is not None and not u['disabled']      # a disabled account fails like a wrong password
         c.execute('INSERT INTO login_attempt (username,ip,ok) VALUES (%s,%s,%s)', (username, ip, ok))
         c.execute("DELETE FROM login_attempt WHERE at < now() - interval '1 day'")
         if not ok:
@@ -83,6 +83,82 @@ def change_password(username, current, new, keep_token=None):
         c.execute('DELETE FROM session WHERE username=%s AND token_hash <> %s', (username, _h(keep_token) if keep_token else ''))
 
 
+class UserError(ValueError):
+    """An administration of users that is not allowed; the message says why and what to do instead."""
+
+
+def generate_password():
+    """A strong temporary password: 20 characters from an alphabet without look-alikes, always passing the password rule."""
+    alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    while True:
+        pw = ''.join(secrets.choice(alphabet) for _ in range(20))
+        if any(ch.islower() for ch in pw) and any(ch.isupper() for ch in pw) and any(ch.isdigit() for ch in pw):
+            return pw
+
+
+def enabled_admins(c, excluding=None):
+    """How many administrators can sign in (not disabled), optionally not counting one of them."""
+    return c.execute("SELECT count(*) AS n FROM app_user WHERE role='admin' AND NOT disabled AND (%s::text IS NULL OR username <> %s)", (excluding, excluding)).fetchone()['n']
+
+
+def _user_row(c, username):
+    u = c.execute('SELECT username, role, disabled FROM app_user WHERE username=%s', (username,)).fetchone()
+    if not u:
+        raise UserError('no such user')
+    return u
+
+
+def reset_password(username, password=None, actor=None):
+    """An administrator sets a new temporary password (the given one, or a generated one) and returns it: the only time it is ever shown.
+    The user must choose their own at the next sign-in, every session of theirs ends, and a sign-in lockout on their name is lifted."""
+    if actor and actor == username:
+        raise UserError('use Change password for your own account')
+    password = password or generate_password()
+    problem = password_problem(password, username)
+    if problem:
+        raise UserError(problem)
+    with conn() as c:
+        _user_row(c, username)
+        c.execute('UPDATE app_user SET password_hash=%s, must_change=true, password_changed_at=now() WHERE username=%s', (hash_password(password), username))
+        c.execute('DELETE FROM session WHERE username=%s', (username,))
+        c.execute('DELETE FROM login_attempt WHERE username=%s', (username,))
+    return password
+
+
+def set_disabled(username, disabled, actor=None):
+    """Disable (or enable again) an account. A disabled user cannot sign in and their sessions end; grants, roles and history stay."""
+    with conn() as c:
+        u = _user_row(c, username)
+        if disabled:
+            if actor and actor == username:
+                raise UserError('you cannot disable your own account')
+            if u['role'] == 'admin' and not u['disabled'] and enabled_admins(c, excluding=username) < 1:
+                raise UserError('this is the only administrator who can sign in: make someone else an administrator first')
+        c.execute('UPDATE app_user SET disabled=%s WHERE username=%s', (bool(disabled), username))
+        if disabled:
+            c.execute('DELETE FROM session WHERE username=%s', (username,))
+    return {'disabled': bool(disabled)}
+
+
+def delete_user(username, actor=None):
+    """Remove a disabled account for good: their sessions and their collection grants go with it. Refused while they are the only manager of a collection.
+    The audit log keeps their name."""
+    with conn() as c:
+        u = _user_row(c, username)
+        if actor and actor == username:
+            raise UserError('you cannot delete your own account')
+        if not u['disabled']:
+            raise UserError('disable the account first: a user is deleted only after it has been disabled')
+        if u['role'] == 'admin' and enabled_admins(c) < 1:
+            raise UserError('there would be no administrator left who can sign in')
+        sole = c.execute("SELECT col.name FROM library.grant_ g JOIN library.collection col ON col.id=g.collection_id WHERE g.username=%s AND g.level='manage' "
+                         "AND (SELECT count(*) FROM library.grant_ m WHERE m.collection_id=g.collection_id AND m.level='manage') < 2 ORDER BY col.name", (username,)).fetchall()
+        if sole:
+            raise UserError('this user is the only manager of: ' + ', '.join(r['name'] for r in sole) + '. Appoint another manager first')
+        c.execute('DELETE FROM app_user WHERE username=%s', (username,))             # sessions and grants cascade
+    return {'deleted': username}
+
+
 def logout(token):
     with conn() as c:
         c.execute('DELETE FROM session WHERE token_hash=%s', (_h(token),))
@@ -92,7 +168,7 @@ def user_from_token(token):
     if not token:
         return None
     with conn() as c:
-        r = c.execute('SELECT u.username,u.role,u.extra_roles,u.entitlements,u.must_change FROM session s JOIN app_user u USING (username) WHERE s.token_hash=%s AND s.expires_at>now()', (_h(token),)).fetchone()
+        r = c.execute('SELECT u.username,u.role,u.extra_roles,u.entitlements,u.must_change FROM session s JOIN app_user u USING (username) WHERE s.token_hash=%s AND s.expires_at>now() AND NOT u.disabled', (_h(token),)).fetchone()
     return {**r, 'roles': roles_of(r)} if r else None
 
 

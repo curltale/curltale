@@ -551,7 +551,9 @@ def set_token_ent(tid: int, body: EntBody, u=Depends(auth.admin_user)):
 @app.delete('/api/admin/tokens/{tid}')
 def del_token(tid: int, u=Depends(auth.admin_user)):
     with db.conn() as c:
-        c.execute('DELETE FROM api_token WHERE id=%s', (tid,))
+        r = c.execute('DELETE FROM api_token WHERE id=%s RETURNING name', (tid,)).fetchone()
+        if r:
+            c.execute("INSERT INTO audit_log (username,action,kind,key) VALUES (%s,'delete','token',%s)", (u['username'], f"token:{r['name']}"))
     return {'ok': True}
 
 
@@ -579,24 +581,73 @@ def _check_roles(role, extra):
 @app.get('/api/admin/users')
 def list_users(u=Depends(auth.admin_user)):
     with db.conn() as c:
-        rows = c.execute('SELECT username,role,extra_roles,created_at,entitlements,must_change,password_changed_at FROM app_user ORDER BY username').fetchall()
+        rows = c.execute('SELECT username,role,extra_roles,created_at,entitlements,must_change,password_changed_at,disabled FROM app_user ORDER BY username').fetchall()
     return [{**r, 'roles': auth.roles_of(r), 'entitlements': access.normalize_user(r['entitlements'])} for r in rows]
+
+
+def _audit_user(actor, action, target, before=None, after=None):
+    """Who did what to which account (never a password)."""
+    with db.conn() as c:
+        c.execute("INSERT INTO audit_log (username,action,kind,key,before,after) VALUES (%s,%s,'user',%s,%s,%s)",
+                  (actor, action, f'user:{target}', db.J(before) if before is not None else None, db.J(after) if after is not None else None))
+
+
+def _user_guard(fn):
+    try:
+        return fn()
+    except auth.UserError as e:
+        raise HTTPException(404 if str(e) == 'no such user' else 422, str(e))
 
 
 @app.post('/api/admin/users')
 def new_user(body: UserBody, u=Depends(auth.admin_user)):
+    """Add a user. An existing name is refused: to change an account use its own actions (roles, entitlements, reset password, disable)."""
     extra = _check_roles(body.role, body.extra_roles)
+    if not body.username.strip() or body.username != body.username.strip():
+        raise HTTPException(422, 'the username cannot be empty or start or end with a space')
     problem = auth.password_problem(body.password, body.username)
     if problem:
         raise HTTPException(422, problem)
     must = body.username != u['username']                     # a password set by an admin is temporary: the user picks their own at the next login
     with db.conn() as c:
-        c.execute('INSERT INTO app_user (username,password_hash,role,extra_roles,entitlements,must_change) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (username) DO UPDATE SET '
-                  'password_hash=EXCLUDED.password_hash, role=EXCLUDED.role, extra_roles=EXCLUDED.extra_roles, entitlements=EXCLUDED.entitlements, must_change=EXCLUDED.must_change',
+        if c.execute('SELECT 1 FROM app_user WHERE username=%s', (body.username,)).fetchone():
+            raise HTTPException(409, f'the user {body.username} already exists: use Reset password, the role and entitlement settings, or Disable on their row')
+        c.execute('INSERT INTO app_user (username,password_hash,role,extra_roles,entitlements,must_change) VALUES (%s,%s,%s,%s,%s,%s)',
                   (body.username, auth.hash_password(body.password), body.role, extra, db.J(access.normalize(body.entitlements)), must))
-        c.execute('DELETE FROM session WHERE username=%s', (body.username,)) if must else None
     _log_grant(u['username'], f'user:{body.username}', access.normalize_user(body.entitlements))
+    _audit_user(u['username'], 'create', body.username, after={'role': body.role, 'extra_roles': extra})
     return {'ok': True}
+
+
+class ResetBody(BaseModel):
+    password: str | None = None
+
+
+@app.post('/api/admin/users/{username}/password')
+def reset_user_password(username: str, body: ResetBody | None = None, u=Depends(auth.admin_user)):
+    """Set a temporary password for a user (give one, or leave it out to generate one). It is returned once and never again; the user must choose their own at the next sign-in."""
+    given = (body.password or None) if body else None
+    pw = _user_guard(lambda: auth.reset_password(username, given, actor=u['username']))
+    _audit_user(u['username'], 'password_reset', username, after={'generated': given is None})
+    return {'ok': True, 'password': pw, 'generated': given is None, 'note': 'shown once: hand it to the user; they must change it at their next sign-in'}
+
+
+class DisabledBody(BaseModel):
+    disabled: bool
+
+
+@app.put('/api/admin/users/{username}/disabled')
+def set_user_disabled(username: str, body: DisabledBody, u=Depends(auth.admin_user)):
+    r = _user_guard(lambda: auth.set_disabled(username, body.disabled, actor=u['username']))
+    _audit_user(u['username'], 'disable' if body.disabled else 'enable', username)
+    return {'ok': True, **r}
+
+
+@app.delete('/api/admin/users/{username}')
+def delete_user(username: str, u=Depends(auth.admin_user)):
+    r = _user_guard(lambda: auth.delete_user(username, actor=u['username']))
+    _audit_user(u['username'], 'delete', username)
+    return {'ok': True, **r}
 
 
 @app.put('/api/admin/users/{username}/roles')
@@ -606,7 +657,7 @@ def set_user_roles(username: str, body: RolesBody, u=Depends(auth.admin_user)):
         old = c.execute('SELECT role,extra_roles FROM app_user WHERE username=%s', (username,)).fetchone()
         if not old:
             raise HTTPException(404, 'no such user')
-        if old['role'] == 'admin' and body.role != 'admin' and c.execute("SELECT count(*) AS n FROM app_user WHERE role='admin'").fetchone()['n'] < 2:
+        if old['role'] == 'admin' and body.role != 'admin' and auth.enabled_admins(c, excluding=username) < 1:
             raise HTTPException(422, 'this is the only admin: make someone else an admin first')
         c.execute('UPDATE app_user SET role=%s, extra_roles=%s WHERE username=%s', (body.role, extra, username))
         c.execute("INSERT INTO audit_log (username,action,kind,key,before,after) VALUES (%s,'grant','roles',%s,%s,%s)", (u['username'], f'user:{username}', db.J(dict(old)), db.J({'role': body.role, 'extra_roles': extra})))

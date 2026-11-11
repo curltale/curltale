@@ -254,3 +254,4 @@ ALTER TABLE app_user DROP CONSTRAINT IF EXISTS app_user_role_check;
 ALTER TABLE app_user ADD CONSTRAINT app_user_role_check CHECK (role IN ('viewer', 'modeller', 'publisher', 'admin'));
 -- roles outside the ladder (today: editor); the ladder itself stays in role
 ALTER TABLE app_user ADD COLUMN IF NOT EXISTS extra_roles text[] NOT NULL DEFAULT '{}';
+ALTER TABLE app_user ADD COLUMN IF NOT EXISTS disabled boolean NOT NULL DEFAULT false;       -- a disabled user cannot sign in; their grants and history stay
