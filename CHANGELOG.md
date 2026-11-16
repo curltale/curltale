@@ -8,6 +8,9 @@ All notable changes are listed here. The project follows semantic versioning; be
 - **Newer evidence wins on topic pages.** The topic writer now knows when each source was added. When sources disagree about something that changes over time (a version, a price, a limit, a date, a policy), the page states the value from the most recently added source as current and keeps an older one only as history, instead of describing the evidence as conflicting.
 - **Disagreements the dates do not settle wait for a person.** When the writer or the revision pass finds sources that disagree and the newer one does not simply replace the older, the change is held on **Knowledge > Review** with the disagreeing statements, like other contradictions. A new topic in that case waits as a draft. A held change's summary and source link are recorded only when it is approved.
 
+### Security
+- Dependencies updated: `opentelemetry-api` 1.45.2.
+
 ## [0.2.4] - 2026-11-11
 
 ### Fixed
