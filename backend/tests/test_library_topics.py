@@ -31,7 +31,7 @@ class TopicFake(Fake):
         super().__init__([PASS], pages=[PAGE], **kw)
         self.analyses, self.searches, self.writer_inputs, self.writer_tool_results, self.surgical_inputs = list(analyses), [], [], [], []
         self.writer_tools = list(writer_tools)
-        self.surgical_preamble = ''
+        self.surgical_preamble, self.surgical_flag, self.writer_flag = '', None, None
 
     def chat_tools(self, messages, tools, run_tool, role='assistant', **kw):
         if role == 'analyzer':
@@ -43,12 +43,16 @@ class TopicFake(Fake):
             if 'Claims that are no longer attributed' in user:                                  # the surgical rewrite: drop the lines that rest on withdrawn claims
                 self.surgical_inputs.append(user)
                 page = user.split('Current topic page:\n\n', 1)[1].split('\n\n---\n\n', 1)[0]
+                if self.surgical_flag:
+                    run_tool('flag_conflict', self.surgical_flag)
                 gone = re.findall(r'- claim: (.+)', user)
                 gone += [f'[source: {m}]' for m in re.findall(r'^- `\[source: ([0-9a-f-]{36})\]`$', user.split('no longer exist', 1)[1], re.M)] if 'no longer exist' in user else []
                 return self.surgical_preamble + '\n'.join(l for l in page.splitlines() if not any(g in l for g in gone)), 0
             self.writer_inputs.append(user)
             for name, args in self.writer_tools:
                 self.writer_tool_results.append(json.loads(run_tool(name, args)))
+            if self.writer_flag and self.writer_flag[0] in user:
+                run_tool('flag_conflict', self.writer_flag[1])
             if 'WRITER_BREAKS' in user:
                 raise RuntimeError('writer down')
             cand = json.loads(user.split('Topic candidate JSON:\n', 1)[1].split('\n\nVerified source wiki evidence:', 1)[0])
@@ -330,3 +334,88 @@ def test_a_page_whose_citations_all_exist_and_nothing_new_is_withdrawn_is_left_a
     _run()
     assert not f.surgical_inputs
     assert client.get(f'/api/library/collections/{a}/topics/refund-policy').json()['markdown'] == before
+
+
+FLAG = {'statements': 'one.md says refunds within thirty days; two.md says fourteen days', 'reason': 'both added the same day'}
+
+
+def _conflicts(client, a, status='open'):
+    return client.get(f'/api/library/collections/{a}/conflicts', params={'status': status}).json()['conflicts']
+
+
+def test_the_writer_sees_when_each_source_was_added(client, world, tfake):
+    a = world['a']['id']
+    ext = dict(REFUNDS, action='update', existing_slug='refund-policy', links=[], aliases=[])
+    f = tfake([analysis(REFUNDS), analysis(ext)])
+    _as(client, 'ann'); one = _upload(client, a, 'one.md', DOC).json()['id']
+    _run()
+    two = _upload(client, a, 'two.md', DOC + b' More.').json()['id']
+    _run()
+    with db.conn() as c:
+        day = {str(r['id']): r['created_at'].date().isoformat() for r in c.execute('SELECT id, created_at FROM library.source WHERE id::text = ANY(%s)', ([one, two],)).fetchall()}
+    w = f.writer_inputs[-1]
+    assert f'Source id: {two} (added {day[two]}' in w                                                       # the source being written from
+    assert 'with the day each was added' in w and f'`[source: {one}]` added {day[one]}' in w                 # and the sources the existing page cites
+    tools = topics.TopicWriterTools(a, two)
+    got = json.loads(tools('get_source_wiki', {'source_id': one}))
+    assert got['added'] == day[one] and got['markdown']
+    assert json.loads(tools('flag_conflict', {'statements': 'x', 'reason': 'y'}))['ok'] and tools.flags == [{'statements': 'x', 'reason': 'y'}]
+    assert 'error' in json.loads(tools('flag_conflict', {'statements': ''}))
+
+
+def test_a_disagreement_the_writer_cannot_settle_by_date_holds_the_update_for_a_person(client, world, tfake):
+    a = world['a']['id']
+    ext = dict(REFUNDS, action='update', existing_slug='refund-policy', claims=[{'claim_text': 'Refund requests must be made in writing.', 'claim_type': 'rule', 'source_quote': 'Yearly plans are refundable within thirty days'}], links=[], aliases=[])
+    f = tfake([analysis(REFUNDS), analysis(ext)])
+    f.writer_flag = ('Existing topic page', FLAG)                                                             # only when amending
+    _as(client, 'ann'); _upload(client, a, 'one.md', DOC)
+    _run()
+    assert not _conflicts(client, a)
+    _upload(client, a, 'two.md', DOC + b' Requests must be made in writing.')
+    _run()
+    [k] = _conflicts(client, a)
+    assert k['kind'] == 'contradiction' and 'dates do not settle it' in k['description'] and 'fourteen days' in k['description']
+    t = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()
+    assert t['version'] == 1 and [s['name'] for s in t['sources']] == ['one.md'] and len(t['claims']) == 2      # nothing published until a person decides
+    assert client.post(f'/api/library/collections/{a}/conflicts/{k["id"]}/approve').status_code == 200
+    t = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()
+    assert t['version'] == 2 and [s['name'] for s in t['sources']] == ['one.md', 'two.md'] and len(t['claims']) == 3
+
+
+def test_a_new_topic_with_a_disagreement_waits_as_a_draft_and_disappears_when_rejected(client, world, tfake):
+    a = world['a']['id']
+    f = tfake([analysis(dict(REFUNDS, links=[]))])
+    f.writer_flag = ('Topic candidate JSON', FLAG)
+    _as(client, 'ann'); _upload(client, a, 'one.md', DOC)
+    _run()
+    [k] = _conflicts(client, a)
+    assert 'refund-policy' not in _topics(client, a)                                                          # a draft is not served
+    assert client.post(f'/api/library/collections/{a}/conflicts/{k["id"]}/reject').status_code == 200
+    with db.conn() as c:
+        assert not c.execute("SELECT 1 FROM library.topic WHERE slug='refund-policy'").fetchone()
+
+
+def test_a_revision_that_finds_a_disagreement_is_held_instead_of_published(client, world, tfake):
+    a = world['a']['id']
+    only_one = dict(REFUNDS, links=[], claims=[REFUNDS['claims'][1]])
+    both = dict(REFUNDS, action='update', existing_slug='refund-policy', links=[], claims=[REFUNDS['claims'][0]])
+    f = tfake([analysis(only_one), analysis(both)])
+    _as(client, 'ann'); one = _upload(client, a, 'one.md', DOC).json()['id']
+    _run()
+    _upload(client, a, 'two.md', DOC + b' Another file.')
+    _run()
+    before = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()
+    f.surgical_flag = FLAG
+    assert client.delete(f'/api/library/collections/{a}/sources/{one}').status_code == 200
+    _run()                                                                                                   # the lint pass
+    assert f.surgical_inputs and 'with the day each was added' in f.surgical_inputs[-1]
+    [k] = _conflicts(client, a)
+    t = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()
+    assert t['version'] == before['version'] and t['markdown'] == before['markdown'] and t['topic']['needs_revision'] is False
+    d = client.get(f'/api/library/collections/{a}/conflicts/{k["id"]}').json()
+    assert d['source'] is None and 'monthly plan' not in d['proposed'].lower()
+    assert client.post(f'/api/library/collections/{a}/conflicts/{k["id"]}/approve').status_code == 200
+    t = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()
+    assert 'monthly plan' not in t['markdown'].lower() and 'yearly plan' in t['markdown'].lower()
+    with db.conn() as c:
+        assert not c.execute("SELECT 1 FROM library.job WHERE kind='topic.revise' AND status='failed'").fetchone()

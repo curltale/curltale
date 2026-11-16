@@ -71,6 +71,9 @@ def search(cid, query, k=6):
     return sorted(out.values(), key=lambda r: -(r['similarity'] or 0))[:k]
 
 
+CITATION = re.compile(r'\[source:\s*([0-9a-fA-F-]{36})\s*\]')
+
+
 def current_markdown(topic_id):
     with conn() as c:
         r = c.execute("SELECT markdown FROM library.topic_version WHERE topic_id=%s AND status='published' ORDER BY version DESC LIMIT 1", (topic_id,)).fetchone()
@@ -95,6 +98,9 @@ WRITER_TOOLS = [
                                                                                       'limit': {'type': 'integer', 'description': 'Maximum results (1-8). Defaults to 5.', 'default': 5}}, 'required': ['query']}}},
     {'type': 'function', 'function': {'name': 'get_source_wiki', 'description': 'Fetch the full approved wiki markdown for a source by its source_id. Use this after search_source_wikis to read a relevant source in full.',
                                       'parameters': {'type': 'object', 'properties': {'source_id': {'type': 'string', 'description': 'Source ID as returned by search_source_wikis.'}}, 'required': ['source_id']}}},
+    {'type': 'function', 'function': {'name': 'flag_conflict', 'description': 'Report a disagreement between sources that the dates do not settle (sources of similar date, an older source that is more specific or authoritative, or a real disagreement rather than an update). The page is then held for a person to decide. Write the page without mentioning the disagreement.',
+                                      'parameters': {'type': 'object', 'properties': {'statements': {'type': 'string', 'description': 'The disagreeing statements, each with the source it comes from.'},
+                                                                                      'reason': {'type': 'string', 'description': 'One sentence: why the dates do not settle it.'}}, 'required': ['statements', 'reason']}}}
 ]
 
 
@@ -114,14 +120,37 @@ class TopicTools:
         raise ValueError(f'unknown tool {name}')
 
 
+def added_dates(cid, ids):
+    """{source id: the day it was added to the collection} for the given ids (those that exist)."""
+    ids = sorted({str(i) for i in ids if i})
+    if not ids:
+        return {}
+    with conn() as c:
+        return {str(r['id']): r['created_at'].date().isoformat() for r in c.execute('SELECT id, created_at FROM library.source WHERE collection_id=%s AND id::text = ANY(%s)', (cid, ids)).fetchall()}
+
+
+def cited_dates_block(cid, markdown):
+    """The sources a page cites, with the day each was added: how the writer tells newer evidence from older."""
+    d = added_dates(cid, CITATION.findall(markdown or ''))
+    return '\n'.join(f'- `[source: {k}]` added {v}' for k, v in sorted(d.items(), key=lambda x: x[1])) if d else ''
+
+
 class TopicWriterTools(TopicTools):
-    """The topic writer's tools: topics, plus the approved source wikis of the same collection (search_source_wikis / get_source_wiki)."""
+    """The topic writer's tools: topics, plus the approved source wikis of the same collection (search_source_wikis / get_source_wiki), plus
+    flag_conflict, which records a disagreement for a person to decide (self.flags)."""
 
     def __init__(self, cid, current_sid=None):
         super().__init__(cid)
         self.current = str(current_sid) if current_sid else None
+        self.flags = []
 
     def __call__(self, name, args):
+        if name == 'flag_conflict':
+            what, why = str(args.get('statements', '')).strip(), str(args.get('reason', '')).strip()
+            if not what:
+                return json.dumps({'error': 'statements is required'})
+            self.flags.append({'statements': what[:1500], 'reason': why[:500]})
+            return json.dumps({'ok': True, 'note': 'Recorded: the page will be held for a person to decide. Write the page without mentioning the disagreement.'})
         if name == 'search_source_wikis':
             limit = max(1, min(int(args.get('limit') or 5), 8))
             seen, out = set(), []
@@ -132,6 +161,9 @@ class TopicWriterTools(TopicTools):
                     out.append({'source_id': sid, 'title': h['title'] or h['name'], 'url': h['url'] or h['name'], 'matched': h['text'][:300]})
                 if len(out) >= limit:
                     break
+            dates = added_dates(self.cid, [o['source_id'] for o in out])
+            for o in out:
+                o['added'] = dates.get(o['source_id'], '')
             return json.dumps({'sources': out})
         if name == 'get_source_wiki':
             sid = str(args.get('source_id', '')).strip()
@@ -146,7 +178,7 @@ class TopicWriterTools(TopicTools):
                 return json.dumps({'error': f'no approved wiki found for source: {sid}'})
             with conn() as c:
                 r = c.execute('SELECT name, title FROM library.source WHERE id=%s AND collection_id=%s', (sid, self.cid)).fetchone()
-            return json.dumps({'source_id': sid, 'title': (r['title'] or r['name']) if r else '', 'markdown': md})
+            return json.dumps({'source_id': sid, 'title': (r['title'] or r['name']) if r else '', 'added': added_dates(self.cid, [sid]).get(sid, ''), 'markdown': md})
         return super().__call__(name, args)
 
 
@@ -261,29 +293,37 @@ def _candidate_json(topic):
             'links': [{'target_title': l['target'], 'relation_type': l['relation'], 'context': l.get('context', '')} for l in topic.get('links') or []]}
 
 
-def write_topic_markdown(cid, sid, topic, source_markdown, existing_markdown='', old_claims=None):
+def write_topic_markdown(cid, sid, topic, source_markdown, existing_markdown='', old_claims=None, flags=None):
     """The topic page, written (or amended) from the candidate and the full verified source wiki, with tools to read related topics and other approved
-    source wikis of the collection. Output that is not a Markdown page falls back to a plain page built from the candidate."""
+    source wikis of the collection. Output that is not a Markdown page falls back to a plain page built from the candidate. Disagreements the writer
+    reports with flag_conflict are appended to `flags` (a list) when one is given."""
     parts = []
     if existing_markdown:
         parts.append(f'Existing topic page (enrich and amend this — do not drop cited facts unless the new evidence supersedes them):\n\n{existing_markdown}\n\n---')
+        cited = cited_dates_block(cid, existing_markdown)
+        if cited:
+            parts.append(f'Sources cited on the existing page, with the day each was added to the collection:\n\n{cited}\n\n---')
     if old_claims:
         block = '\n'.join(f"- claim: {c['text']}\n  quote: {c.get('quote') or '(no quote)'}" for c in old_claims)
         parts.append(f'Claims from the previous version of this source that are being replaced (for context on what changed):\n\n{block}\n\n---')
-    parts.append(f"Source id: {sid}\n\nTopic candidate JSON:\n{json.dumps(_candidate_json(topic), indent=2, ensure_ascii=False)}\n\nVerified source wiki evidence:\n\n{source_markdown}")
+    added = added_dates(cid, [sid]).get(str(sid), '') if sid else ''
+    parts.append(f"Source id: {sid}" + (f" (added {added}, the newest evidence here unless a source above was added later)" if added else '') + f"\n\nTopic candidate JSON:\n{json.dumps(_candidate_json(topic), indent=2, ensure_ascii=False)}\n\nVerified source wiki evidence:\n\n{source_markdown}")
     system = (PROMPTS / 'topic_writer.md').read_text().replace('{{title}}', topic['title']).replace('{{type_template}}', _template(cid, topic.get('topic_type') or ''))
     msgs = [{'role': 'system', 'content': system}, {'role': 'user', 'content': '\n\n'.join(parts)}]
+    tools = TopicWriterTools(cid, sid)
     try:
-        text, _ = llm.chat_tools(msgs, WRITER_TOOLS, TopicWriterTools(cid, sid), role='topic_writer', max_rounds=12, max_tokens=12000, temperature=0.2)
+        text, _ = llm.chat_tools(msgs, WRITER_TOOLS, tools, role='topic_writer', max_rounds=12, max_tokens=12000, temperature=0.2)
     except Exception:
         text = ''
+    if flags is not None:
+        flags.extend(tools.flags)
     md = (text or '').strip().lstrip('﻿')
     if not md.startswith('#'):
         md = wiki._strip_preamble(md)
     return md if md.startswith('#') else _fallback_page(topic, sid)
 
 
-def surgical_rewrite(cid, tid, superseded, current_sid=None, missing_sources=()):
+def surgical_rewrite(cid, tid, superseded, current_sid=None, missing_sources=(), flags=None):
     """The surgical rewrite: audit each withdrawn claim against the remaining sources (with tools) and remove or soften only the passages
     nothing else supports. Sources the page still cites but that no longer exist (removed, or replaced by a newer upload) are named, so that what
     rests only on them goes too. -> the revised page, or None when the writer did not return a Markdown page."""
@@ -295,8 +335,14 @@ def surgical_rewrite(cid, tid, superseded, current_sid=None, missing_sources=())
     if missing_sources:
         user += ('\n\n---\n\nSources cited on this page that no longer exist (removed, or replaced by a newer upload):\n\n'
                  + '\n'.join(f'- `[source: {s}]`' for s in missing_sources))
+    cited = cited_dates_block(cid, md)
+    if cited:
+        user += f'\n\n---\n\nSources cited on this page that still exist, with the day each was added to the collection:\n\n{cited}'
     msgs = [{'role': 'system', 'content': (PROMPTS / 'topic_surgical.md').read_text()}, {'role': 'user', 'content': user}]
-    text, _ = llm.chat_tools(msgs, WRITER_TOOLS, TopicWriterTools(cid, current_sid), role='topic_writer', max_rounds=12, max_tokens=12000, temperature=0)
+    tools = TopicWriterTools(cid, current_sid)
+    text, _ = llm.chat_tools(msgs, WRITER_TOOLS, tools, role='topic_writer', max_rounds=12, max_tokens=12000, temperature=0)
+    if flags is not None:
+        flags.extend(tools.flags)
     out = wiki._strip_preamble((text or '').strip().lstrip('\ufeff'))     # a model may explain its decision before the page: keep the page
     return out if out.startswith('#') else None
 
@@ -393,6 +439,21 @@ def _wiki_version(cid, sid):
     return r['v'] if r else None
 
 
+def flag_text(flags):
+    """How a disagreement reported by the writer reads on the review page."""
+    return ' '.join(f"The sources disagree and their dates do not settle it: {f['statements']}" + (f" ({f['reason']})" if f['reason'] else '') for f in flags)[:1000]
+
+
+def hold(cid, tid, markdown, reason, flags, base, source_id=None):
+    """Store a revision as held for review, with the writer's reported disagreement as the reason. -> the version."""
+    ver = store_version(cid, tid, markdown, reason, 'held')
+    with conn() as c:
+        c.execute("INSERT INTO library.topic_conflict (collection_id,topic_id,version,base_version,kind,description,source_id) VALUES (%s,%s,%s,%s,'contradiction',%s,%s)",
+                  (cid, tid, ver, base, flag_text(flags), source_id))
+        c.execute('UPDATE library.topic SET needs_revision=false WHERE id=%s', (tid,))
+    return ver
+
+
 def run(cid, sid, markdown, title, ctx=None, user='system'):
     """Update the topic wiki of one collection from an approved source wiki. Changes that contradict the existing page, and new topics that look like
     an existing one, are written but held for a person (the review gate). Returns {'created', 'updated', 'held', 'proposals', 'revised'}."""
@@ -442,8 +503,6 @@ def run(cid, sid, markdown, title, ctx=None, user='system'):
                 tid, slug = target['id'], target['slug']
                 existing_md = current_markdown(tid)                                     # an existing page is always extended, never overwritten
                 base = _published_version(c, tid)
-                if not held:
-                    c.execute("UPDATE library.topic SET updated_at=now(), summary=CASE WHEN %s<>'' THEN %s ELSE summary END WHERE id=%s", (t['summary'], t['summary'], tid))
                 is_new = False
             else:
                 slug = _unique_slug(c, cid, t['slug'])
@@ -452,15 +511,24 @@ def run(cid, sid, markdown, title, ctx=None, user='system'):
                 existing_md, is_new, base = '', True, None
             for a in [t['title']] + t['aliases']:
                 c.execute('INSERT INTO library.topic_alias (collection_id,topic_id,alias) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING', (cid, tid, a))
-            if not held:                                                               # a held change's source counts once a person approves it
-                c.execute('INSERT INTO library.topic_source (collection_id,topic_id,source_id,wiki_version) VALUES (%s,%s,%s,%s) ON CONFLICT (topic_id, source_id) DO UPDATE SET wiki_version=EXCLUDED.wiki_version',
-                          (cid, tid, sid, wiki_version))
             old_claims = active_claims_from_source(c, tid, sid) if existing_md else []
-        md = write_topic_markdown(cid, sid, {**t, 'slug': slug, 'topic_type': stored_type}, markdown, existing_md, old_claims=[dict(x) for x in old_claims] or None)
+        flags = []
+        md = write_topic_markdown(cid, sid, {**t, 'slug': slug, 'topic_type': stored_type}, markdown, existing_md, old_claims=[dict(x) for x in old_claims] or None, flags=flags)
+        if flags:                                                                      # the writer found a disagreement the dates do not settle: a person decides
+            text = flag_text(flags)
+            conflict = {**conflict, 'text': f"{conflict['text']} {text}"} if conflict else {'kind': 'contradiction', 'n': None, 'dup': None, 'text': text}
+            if not held and is_new:
+                with conn() as c:
+                    c.execute("UPDATE library.topic SET status='draft' WHERE id=%s", (tid,))
+            held = True
         reason = f"{'Created' if is_new else 'Updated'} from source {sid}" + (f" ({t['action']})" if not is_new else '')
         ver = store_version(cid, tid, md, reason, 'held' if held else 'published')
         with conn() as c:
-            if not held:
+            if not held:                                                               # a held change's source and summary count once a person approves it
+                if not is_new:
+                    c.execute("UPDATE library.topic SET updated_at=now(), summary=CASE WHEN %s<>'' THEN %s ELSE summary END WHERE id=%s", (t['summary'], t['summary'], tid))
+                c.execute('INSERT INTO library.topic_source (collection_id,topic_id,source_id,wiki_version) VALUES (%s,%s,%s,%s) ON CONFLICT (topic_id, source_id) DO UPDATE SET wiki_version=EXCLUDED.wiki_version',
+                          (cid, tid, sid, wiki_version))
                 supersede_from_source(c, tid, sid)
             insert_claims(c, cid, tid, sid, wiki_version, t['claims'], 'pending' if held else 'active')
             if held:
@@ -508,11 +576,16 @@ def run(cid, sid, markdown, title, ctx=None, user='system'):
                 c.execute("UPDATE library.topic SET status='archived', needs_revision=false, updated_at=now() WHERE id=%s AND status='active'", (tid,))
                 continue
         if old:
+            flags = []
             try:
-                out = surgical_rewrite(cid, tid, [dict(x) for x in old], sid)
+                out = surgical_rewrite(cid, tid, [dict(x) for x in old], sid, flags=flags)
             except Exception:
                 out = None
-            if out:
+            if out and flags:
+                with conn() as c:
+                    base = _published_version(c, tid)
+                hold(cid, tid, out, f'Revised after source {sid} dropped this topic', flags, base)
+            elif out:
                 store_version(cid, tid, out, f'Revised after source {sid} dropped this topic')
                 revised.append(str(tid))
             else:
@@ -630,9 +703,6 @@ def merge(cid, from_id, into_id, user, reason='merged'):
 
 
 # ---------------------------------------------------------------- revising pages after a source is gone
-CITATION = re.compile(r'\[source:\s*([0-9a-fA-F-]{36})\s*\]')
-
-
 def missing_citations(c, cid, markdown):
     """Source ids the page cites that are not (any more) in the collection."""
     cited = sorted(set(CITATION.findall(markdown or '')))
@@ -662,9 +732,15 @@ def revise(cid, tid):
         if not gone and not missing:
             c.execute('UPDATE library.topic SET needs_revision=false WHERE id=%s', (tid,))
             return 'unchanged'
-    new = surgical_rewrite(cid, tid, sorted((dict(g) for g in gone), key=lambda g: g['n']), missing_sources=missing)
+    flags = []
+    new = surgical_rewrite(cid, tid, sorted((dict(g) for g in gone), key=lambda g: g['n']), missing_sources=missing, flags=flags)
     if not new:
         raise RuntimeError('the writer did not return a page when asked to revise it')
+    if flags:                                                                          # a disagreement the dates do not settle: a person decides
+        with conn() as c:
+            base = _published_version(c, tid)
+        hold(cid, tid, new, 'Lint pass: revised after a contributing source was removed or replaced', flags, base)
+        return 'held'
     store_version(cid, tid, new, 'Lint pass: revised after a contributing source was removed or replaced')
     index.embed_topic(cid, tid)
     return 'revised'
