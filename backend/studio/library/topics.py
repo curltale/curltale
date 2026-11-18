@@ -205,11 +205,18 @@ def _entities_text(markdown):
     return '\n'.join(f"{k} | {e['name']} | {e.get('domain') or ''} | {(e.get('definition') or '')[:140]}" for k, e in cat.items())
 
 
-def analyze(cid, markdown, title):
-    """The topic analyzer, with the collection's ontology and the data model injected; it may search and read existing topics first."""
+def analyze(cid, markdown, title, previous=None):
+    """The topic analyzer, with the collection's ontology and the data model injected; it may search and read existing topics first. `previous`: the
+    topics this source already feeds, when it is a new version of a source (replaced or captured again), so they are updated rather than duplicated."""
     tt, rt = _vocab_text(cid)
     system = (PROMPTS / 'analyzer.md').read_text().replace('{{topic_types}}', tt).replace('{{relation_types}}', rt).replace('{{entities}}', _entities_text(markdown))
-    msgs = [{'role': 'system', 'content': system}, {'role': 'user', 'content': f'Source title: {title or ""}\n\nVerified source wiki:\n\n{markdown}'}]
+    before = ''
+    if previous:
+        rows = '\n'.join(f"- {p['slug']}: {p['title']}" for p in previous)
+        before = ('This source is a new version of a document already in the collection. Its previous version fed these topics. Where the new version '
+                  'still covers one of these subjects, update that topic (action "update", existing_slug set to its slug) instead of creating a new '
+                  'one; leave out the ones it no longer covers.\n\n' + rows + '\n\n')
+    msgs = [{'role': 'system', 'content': system}, {'role': 'user', 'content': f'{before}Source title: {title or ""}\n\nVerified source wiki:\n\n{markdown}'}]
     for attempt in range(2):
         text, _ = llm.chat_tools(msgs, TOOLS, TopicTools(cid), role='analyzer', max_rounds=20, max_tokens=12000)
         data = wiki._json_object(text)
@@ -464,9 +471,11 @@ def run(cid, sid, markdown, title, ctx=None, user='system'):
     step = ctx.progress if ctx else (lambda *a, **k: None)
     step('deciding which topics this source changes', 20)
     wiki_version = _wiki_version(cid, sid)
-    analysis = normalize(analyze(cid, markdown, title), markdown, title or 'Knowledge Topic')
     with conn() as c:
+        prev_rows = c.execute("SELECT t.id, t.slug, t.title FROM library.topic_source ts JOIN library.topic t ON t.id=ts.topic_id WHERE ts.source_id=%s AND ts.collection_id=%s AND t.status='active' ORDER BY t.title",
+                              (sid, cid)).fetchall()
         prev_topics = {str(r['topic_id']) for r in c.execute('SELECT topic_id FROM library.topic_source WHERE source_id=%s AND collection_id=%s', (sid, cid)).fetchall()}
+    analysis = normalize(analyze(cid, markdown, title, previous=[dict(r) for r in prev_rows]), markdown, title or 'Knowledge Topic')
     created, updated, held_list, by_title, touched, held_titles, new_topics = [], [], [], {}, [], set(), set()
     v = vocab.get(cid)
     approved_t = {r['name'] for r in v['topic_types'] if r['status'] == 'approved'}

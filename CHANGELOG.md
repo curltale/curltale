@@ -2,6 +2,11 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [0.3.2] - 2026-11-18
+
+### Added
+- **Replace a document with a new version.** *Replace with a new version* on a source's page (and `POST /api/library/collections/{ref}/sources/{id}/replace`) uploads a newer version of an uploaded file. It stays the same source: it is read again, and the topics it feeds are updated in place, keeping their names and links. Newer evidence wins, what the new version no longer says is withdrawn, and a topic it no longer covers is revised, archived only if no other source supports it. The topic analyzer is told which topics the previous version fed, so it updates them rather than creating new ones. Deleting the source and uploading the new file still works, but then the topics are written again from scratch. Refused, with the reason, for a web page (use *Refresh*), an interview, a document still being read, the same file again, or a file already in the collection. The previous file is removed from storage; an S3 bucket with versioning keeps it.
+
 ## [0.3.1] - 2026-11-18
 
 ### Fixed

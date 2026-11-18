@@ -74,6 +74,13 @@ class LocalStore:
     def exists(self, key):
         return os.path.isfile(self._path(key))
 
+    def delete(self, key):
+        """One stored file (a missing one is not an error)."""
+        try:
+            os.unlink(self._path(key))
+        except FileNotFoundError:
+            pass
+
     def delete_prefix(self, prefix):
         p = self._path(prefix.rstrip('/'))
         n = sum(len(f) for _, _, f in os.walk(p)) if os.path.isdir(p) else 0
@@ -124,6 +131,10 @@ class S3Store:
             return True
         except ClientError:
             return False
+
+    def delete(self, key):
+        """One object. In a versioned bucket this adds a delete marker: earlier versions are kept, as the bucket's owner chose."""
+        self.s3.delete_object(Bucket=self.bucket, Key=self._key(key))
 
     def delete_prefix(self, prefix):
         """Every object under the prefix, including all versions and delete markers of a versioned bucket."""

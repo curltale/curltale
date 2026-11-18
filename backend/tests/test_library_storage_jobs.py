@@ -45,6 +45,23 @@ def test_s3_store_deletes_every_version():
         storage.S3Store('')
 
 
+@mock_aws
+def test_deleting_one_file_keeps_its_neighbours_and_the_buckets_versions():
+    s3 = boto3.client('s3', region_name='us-east-1')
+    s3.create_bucket(Bucket='docs')
+    s3.put_bucket_versioning(Bucket='docs', VersioningConfiguration={'Status': 'Enabled'})
+    st = storage.S3Store('docs', prefix='lib', region='us-east-1', access_key='k', secret_key='s')
+    st.put('c1/s1/old.md', io.BytesIO(b'v1')); st.put('c1/s1/new.md', io.BytesIO(b'v2'))
+    st.delete('c1/s1/old.md')
+    assert not st.exists('c1/s1/old.md') and st.open('c1/s1/new.md').read() == b'v2'
+    assert [v['Key'] for v in s3.list_object_versions(Bucket='docs')['Versions']].count('lib/c1/s1/old.md') == 1     # versioning keeps the old file
+    import tempfile
+    local = storage.LocalStore(tempfile.mkdtemp())
+    local.put('c1/s1/old.md', io.BytesIO(b'v1')); local.put('c1/s1/new.md', io.BytesIO(b'v2'))
+    local.delete('c1/s1/old.md'); local.delete('c1/s1/missing.md')
+    assert not local.exists('c1/s1/old.md') and local.exists('c1/s1/new.md')
+
+
 # ------------------------------------------------------------------ jobs
 @pytest.fixture
 def col(client):

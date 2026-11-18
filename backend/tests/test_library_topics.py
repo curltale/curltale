@@ -419,3 +419,65 @@ def test_a_revision_that_finds_a_disagreement_is_held_instead_of_published(clien
     assert 'monthly plan' not in t['markdown'].lower() and 'yearly plan' in t['markdown'].lower()
     with db.conn() as c:
         assert not c.execute("SELECT 1 FROM library.job WHERE kind='topic.revise' AND status='failed'").fetchone()
+
+
+# ------------------------------------------------------------------ replacing a file with a new version
+def _replace(client, a, sid, name, data):
+    return client.post(f'/api/library/collections/{a}/sources/{sid}/replace', files={'file': (name, data, 'text/markdown')})
+
+
+def test_a_replaced_file_updates_its_topics_in_place_and_withdraws_what_it_no_longer_says(client, world, tfake, monkeypatch):
+    import os
+    a = world['a']['id']
+    f = tfake([analysis(REFUNDS, PREMIUM), analysis(dict(REFUNDS, action='update', existing_slug='refund-policy', links=[]))])
+    seen = []
+    def watch(messages, tools, run_tool, role='assistant', **kw):
+        if role == 'analyzer':
+            seen.append(messages[1]['content'])
+        return f.chat_tools(messages, tools, run_tool, role, **kw)
+    monkeypatch.setattr(llm, 'chat_tools', watch)
+    _as(client, 'ann'); sid = _upload(client, a, 'refunds.md', DOC).json()['id']
+    _run()
+    before = _topics(client, a)
+    assert set(before) == {'refund-policy', 'premium-plan'}
+    v_before = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()['version']
+    r = _replace(client, a, sid, 'refunds-2026.md', DOC + b' Refunds are paid within five working days.')
+    assert r.status_code == 200 and r.json() == {'id': sid, 'name': 'refunds-2026.md', 'status': 'queued'}        # the same source, under its new name
+    _run()
+    assert 'Its previous version fed these topics' in seen[1] and '- refund-policy: Refund policy' in seen[1] and '- premium-plan: Premium plan' in seen[1]
+    assert 'previous version' not in seen[0]                                                                   # a first upload gets no such list
+    after = _topics(client, a)
+    t = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()
+    assert 'refund-policy' in after and t['version'] > v_before and [s['name'] for s in t['sources']] == ['refunds-2026.md']     # updated in place, same name
+    assert 'premium-plan' not in after                                                                         # the new version no longer covers it, and nothing else does
+    with db.conn() as c:
+        assert c.execute("SELECT status FROM library.topic WHERE slug='premium-plan'").fetchone()['status'] == 'archived'
+        assert c.execute('SELECT count(*) AS n FROM library.source WHERE collection_id=%s', (a,)).fetchone()['n'] == 1
+    folder = os.path.join(os.environ['DATA_DIR'], 'library', a, sid)
+    assert os.listdir(folder) == ['refunds-2026.md']                                                            # the previous file is gone from storage
+    assert client.get(f'/api/library/collections/{a}/sources/{sid}/download/original').content.endswith(b'five working days.')
+
+
+def test_replacing_is_refused_when_it_would_change_nothing_or_is_not_a_file(client, world, tfake):
+    a = world['a']['id']
+    tfake([analysis(REFUNDS)])
+    _as(client, 'ann')
+    sid = _upload(client, a, 'refunds.md', DOC).json()['id']
+    other = _upload(client, a, 'other.md', b'Another document about something else entirely.').json()['id']
+    r = _replace(client, a, sid, 'refunds.md', DOC)
+    assert r.status_code == 409 and 'still being read' in r.json()['detail']                                   # queued: not yet
+    _run()
+    r = _replace(client, a, sid, 'refunds.md', DOC)
+    assert r.status_code == 409 and 'same file' in r.json()['detail']
+    r = _replace(client, a, sid, 'copy.md', b'Another document about something else entirely.')
+    assert r.status_code == 409 and "already in the collection as 'other.md'" in r.json()['detail']
+    assert _replace(client, a, sid, 'x.exe', b'MZ').status_code == 422
+    assert _replace(client, a, '00000000-0000-0000-0000-000000000000', 'a.md', b'x y z').status_code == 404
+    with db.conn() as c:
+        c.execute("UPDATE library.source SET kind='url', url='https://example.com/p' WHERE id=%s", (other,))
+    r = _replace(client, a, other, 'p.md', b'Fresh text for the page.')
+    assert r.status_code == 422 and 'Refresh' in r.json()['detail']
+    _as(client, 'bob')                                                                                         # a reader cannot replace
+    assert _replace(client, a, sid, 'refunds.md', DOC + b' more').status_code == 403
+    _as(client, 'ann')
+    assert client.get(f'/api/library/collections/{a}/sources/{sid}/wiki').json()['source']['kind'] == 'file'

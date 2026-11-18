@@ -30,6 +30,24 @@ export default function SourcePage() {
     try { const r = await api.put(`/api/library/collections/${cid}/sources/${sid}/wiki`, { markdown: draft }); setDraft(null); setVer(null); setWaiting(r.checking); await load() } catch (e) { setErr(e.message) }
     setBusy(false)
   }
+  const fileRef = useRef(), [rep, setRep] = useState({ busy: false, msg: '', bad: false })
+  const reading = d && ['queued', 'processing'].includes(d.source.status)
+  useEffect(() => {                                              // after a replace, follow the new version until it has been read
+    if (!reading) return
+    const t = setTimeout(load, 4000)
+    return () => clearTimeout(t)
+  }, [reading, d])
+  const replace = async (f) => {
+    if (!f) return
+    setRep({ busy: true, msg: '', bad: false })
+    try {
+      const fd = new FormData(); fd.append('file', f)
+      const r = await fetch(`/api/library/collections/${cid}/sources/${sid}/replace`, { method: 'POST', body: fd, credentials: 'same-origin' })
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.detail || r.statusText) }
+      setRep({ busy: false, msg: `${f.name} is the new version. It is being read; the topics it feeds are then updated in place.`, bad: false }); setVer(null); await load()
+    } catch (e) { setRep({ busy: false, msg: e.message, bad: true }) }
+    if (fileRef.current) fileRef.current.value = ''
+  }
   const act = async (what) => { setBusy(true); try { await api.post(`/api/library/collections/${cid}/sources/${sid}/wiki/${what}`); if (what === 'approve') await load() } catch (e) { setErr(e.message) } setBusy(false) }
   if (err) return <div className="banner bad">{err} <Link to={`/library/sources?c=${cid}`}>Back</Link></div>
   if (!d) return <p className="muted">Loading…</p>
@@ -46,10 +64,14 @@ export default function SourcePage() {
               {d.versions.length > 1 && <select style={{ width: 'auto' }} value={d.version || ''} onChange={(e) => setVer(+e.target.value)}>{d.versions.map((v) => <option key={v.version} value={v.version}>Version {v.version} · {v.origin}</option>)}</select>}</div>
             <h1 style={{ fontSize: 26 }}>{s.title || s.name}</h1>
             <div className="muted small" style={{ marginBottom: 14 }}>{s.name}. {col.usage_note}</div>
+            {rep.msg && <div className={`banner ${rep.bad ? 'bad' : 'ok'}`}>{rep.msg}</div>}
             <div className="row" style={{ marginBottom: 14 }}>
               {canWrite && s.status === 'ready' && draft == null && <button className="btn small" onClick={() => setDraft(d.markdown || '')}>{d.markdown ? 'Edit the page' : 'Write the page by hand'}</button>}
               {d.markdown && <a className="btn small" href={`/api/library/collections/${cid}/sources/${sid}/download/page${d.version ? `?version=${d.version}` : ''}`}>Download the page</a>}
               <a className="btn small" href={`/api/library/collections/${cid}/sources/${sid}/download/original`}>Download the original file</a>
+              {canWrite && s.kind === 'file' && !reading && <><button className="btn small" disabled={rep.busy} title="Upload a new version of this document: it stays the same source and its topics are updated in place" onClick={() => fileRef.current?.click()}>{rep.busy ? 'Uploading…' : 'Replace with a new version'}</button>
+                <input ref={fileRef} type="file" hidden onChange={(e) => replace(e.target.files[0])} /></>}
+              {reading && <span className="small muted">Reading the document…</span>}
               {waiting && <span className="small muted">Checking your version…</span>}</div>
             {draft != null ? <>
               <textarea className="mono" style={{ width: '100%', minHeight: '55vh', fontSize: 13 }} value={draft} onChange={(e) => setDraft(e.target.value)} aria-label="Page text (Markdown)" />

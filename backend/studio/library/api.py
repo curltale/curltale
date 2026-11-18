@@ -204,10 +204,8 @@ def list_sources(ref: str, sc=Depends(scope_of)):
     return {'collection': {'id': col.id, 'name': col.name, 'usage': col.usage, 'level': col.level, 'allow_ai': col.allow_ai}, 'sources': [_src(r, st) for r in rows]}
 
 
-@router.post('/collections/{ref}/sources')
-def upload_source(ref: str, file: UploadFile = File(...), u=Depends(auth.current_user), sc=Depends(scope_of)):
-    col = S.open_collection(sc, ref, 'write')
-    _ingest_limit(u)
+def _receive(file):
+    """An uploaded file, checked and spooled: -> (clean name, file handle, size, sha256)."""
     name = storage.clean_name(file.filename)
     ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
     if ext not in EXTENSIONS:
@@ -217,7 +215,16 @@ def upload_source(ref: str, file: UploadFile = File(...), u=Depends(auth.current
     except ValueError as e:
         raise HTTPException(413, str(e))
     if size == 0:
+        fh.close()
         raise HTTPException(422, 'the file is empty')
+    return name, fh, size, digest
+
+
+@router.post('/collections/{ref}/sources')
+def upload_source(ref: str, file: UploadFile = File(...), u=Depends(auth.current_user), sc=Depends(scope_of)):
+    col = S.open_collection(sc, ref, 'write')
+    _ingest_limit(u)
+    name, fh, size, digest = _receive(file)
     with fh, db.conn() as c:
         dup = c.execute('SELECT id,name FROM library.source WHERE collection_id=%s AND sha256=%s', (col.id, digest)).fetchone()
         if dup:
@@ -234,6 +241,49 @@ def upload_source(ref: str, file: UploadFile = File(...), u=Depends(auth.current
     jobs.enqueue('source.ingest', col.id, r['id'], user=u['username'])
     _audit(u['username'], 'upload', col.id, after={'source': str(r['id']), 'size': size})
     return {'id': str(r['id']), 'name': name, 'status': 'queued'}
+
+
+@router.post('/collections/{ref}/sources/{sid}/replace')
+def replace_source(ref: str, sid: str, file: UploadFile | None = File(None), u=Depends(auth.current_user), sc=Depends(scope_of)):
+    """A new version of an uploaded file. It stays the same source: it is read again, and the topics it feeds are updated in place (what the new
+    version no longer says is withdrawn, newer evidence wins) instead of being withdrawn and written again from scratch, as a delete and a new
+    upload would. The previous file is replaced in storage (an S3 bucket with versioning keeps it)."""
+    col = S.open_collection(sc, ref, 'write')
+    _ingest_limit(u)
+    with db.conn() as c:
+        src = c.execute('SELECT id, name, kind, status, sha256, storage_key FROM library.source WHERE id::text=%s AND collection_id=%s', (sid, col.id)).fetchone()
+    if not src:
+        raise HTTPException(404, 'no such source')
+    if src['kind'] != 'file':
+        raise HTTPException(422, 'only an uploaded file can be replaced: capture a web page again with Refresh; an interview is edited, not replaced')
+    if src['status'] in ('queued', 'processing'):
+        raise HTTPException(409, 'this document is still being read: replace it once it is ready')
+    if file is None:                                                    # looked at only once access is settled: a caller without it learns nothing
+        raise HTTPException(422, 'send the new version as a file')
+    name, fh, size, digest = _receive(file)
+    with fh:
+        if digest == src['sha256']:
+            raise HTTPException(409, 'this is the same file as the current version: nothing to replace')
+        with db.conn() as c:
+            dup = c.execute('SELECT name FROM library.source WHERE collection_id=%s AND sha256=%s AND id<>%s', (col.id, digest, src['id'])).fetchone()
+        if dup:
+            raise HTTPException(409, f"this file is already in the collection as '{dup['name']}'")
+        key = f"{col.id}/{src['id']}/{name}"
+        try:
+            storage.store().put(key, fh)
+        except Exception as e:
+            raise HTTPException(502, f'the file could not be stored ({type(e).__name__}: {str(e)[:120]}); the current version is unchanged')
+    if src['storage_key'] != key:
+        try:
+            storage.store().delete(src['storage_key'])                          # the previous file under its old name
+        except Exception:
+            pass                                                                # a leftover file is harmless: the source points at the new one
+    with db.conn() as c:
+        c.execute("UPDATE library.source SET name=%s, mime=%s, size=%s, sha256=%s, storage_key=%s, status='queued', error=NULL, "
+                  "stats = stats || %s::jsonb WHERE id=%s", (name, file.content_type, size, digest, key, json.dumps({'replaced_by': u['username']}), src['id']))
+    jobs.enqueue('source.ingest', col.id, src['id'], user=u['username'])
+    _audit(u['username'], 'replace_source', col.id, before={'source': str(src['id']), 'name': src['name']}, after={'name': name, 'size': size})
+    return {'id': str(src['id']), 'name': name, 'status': 'queued'}
 
 
 @router.post('/collections/{ref}/sources/{sid}/retry')
@@ -288,14 +338,14 @@ def source_wiki(ref: str, sid: str, version: int | None = None, sc=Depends(scope
     """The current (or a given) version of the source page, the checks made on each version, and the list of versions."""
     col = S.open_collection(sc, ref)
     with db.conn() as c:
-        src = c.execute('SELECT id,name,title,wiki_status,status FROM library.source WHERE id::text=%s AND collection_id=%s', (sid, col.id)).fetchone()
+        src = c.execute('SELECT id,name,title,wiki_status,status,kind FROM library.source WHERE id::text=%s AND collection_id=%s', (sid, col.id)).fetchone()
         if not src:
             raise HTTPException(404, 'no such source')
         versions = c.execute('SELECT version,origin,created_by,created_at FROM library.wiki_version WHERE source_id=%s AND collection_id=%s ORDER BY version DESC', (src['id'], col.id)).fetchall()
         cur = next((v for v in versions if v['version'] == version), versions[0] if versions and version is None else None)
         page = c.execute('SELECT markdown FROM library.wiki_version WHERE source_id=%s AND collection_id=%s AND version=%s', (src['id'], col.id, cur['version'])).fetchone() if cur else None
         checks = c.execute('SELECT version,round,verdict,issues,tool_calls,at FROM library.wiki_check WHERE source_id=%s AND collection_id=%s ORDER BY id', (src['id'], col.id)).fetchall()
-    return {'source': {'id': str(src['id']), 'name': src['name'], 'title': src['title'], 'status': src['status'], 'wiki_status': src['wiki_status']},
+    return {'source': {'id': str(src['id']), 'name': src['name'], 'title': src['title'], 'status': src['status'], 'wiki_status': src['wiki_status'], 'kind': src['kind']},
             'collection': {'name': col.name, 'usage': col.usage, 'usage_note': S.USAGE_NOTE[col.usage], 'level': col.level},
             'version': cur['version'] if cur else None, 'markdown': page['markdown'] if page else None, 'versions': versions, 'checks': checks}
 
