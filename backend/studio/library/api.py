@@ -415,7 +415,9 @@ def collection_inbox(ref: str, sc=Depends(scope_of)):
     manager also decides the vocabulary."""
     col = S.open_collection(sc, ref, 'write')
     with db.conn() as c:
-        held = c.execute("SELECT k.id, k.kind, k.description, k.created_at, t.slug, t.title FROM library.topic_conflict k JOIN library.topic t ON t.id=k.topic_id AND t.collection_id=k.collection_id WHERE k.collection_id=%s AND k.status='open' ORDER BY k.id DESC", (col.id,)).fetchall()
+        held = c.execute("SELECT k.id, k.kind, k.description, k.created_at, t.slug, t.title, EXISTS (SELECT 1 FROM library.job j WHERE j.kind='topic.approve' AND j.collection_id=k.collection_id "
+                         "AND j.payload->>'conflict_id' = k.id::text AND j.status IN ('queued','running')) AS approving FROM library.topic_conflict k JOIN library.topic t ON t.id=k.topic_id AND t.collection_id=k.collection_id "
+                         "WHERE k.collection_id=%s AND k.status='open' ORDER BY k.id DESC", (col.id,)).fetchall()
         pages = c.execute("SELECT id, name, title FROM library.source WHERE collection_id=%s AND wiki_status='needs_review' ORDER BY created_at DESC", (col.id,)).fetchall()
         links = c.execute("SELECT t.slug, t.title, r.kind, r.ref, r.relation, r.confidence, r.reason FROM library.topic_model_ref r JOIN library.topic t ON t.id=r.topic_id AND t.collection_id=r.collection_id "
                           "WHERE r.collection_id=%s AND r.status='suggested' AND t.status='active' ORDER BY t.title", (col.id,)).fetchall()
@@ -589,7 +591,13 @@ def get_conflict(ref: str, kid: int, sc=Depends(scope_of)):
                                                             (col.id, k['source_id'], k['topic_id'])).fetchall()}
     for x in new:
         x['evidence'] = [{kk: vv for kk, vv in e.items() if kk != 'claim_id'} for e in ev if e['claim_id'] == x['id']]
+    job = topics_mod.approval_job(col.id, kid)
+    with db.conn() as c:
+        moved_on = k['status'] == 'open' and (topics_mod._published_version(c, k['topic_id']) or None) != (k['base_version'] or None) and k['base_version'] is not None
+    approval = {'status': {'queued': 'approving', 'running': 'approving', 'failed': 'failed'}.get(job['status'], job['status']), 'error': re.sub(r'^Permanent: ', '', job['error'] or '') if job['status'] == 'failed' else None,
+                'by': job['created_by']} if job else None
     return {'collection': {'name': col.name, 'level': col.level, 'usage': col.usage}, 'conflict': {k_: v for k_, v in k.items() if k_ not in ('collection_id',)}, 'topic': t,
+            'page_moved_on': moved_on, 'approval': approval,
             'current': topics_mod.current_markdown(k['topic_id']), 'proposed': held['markdown'] if held else None, 'new_claims': new, 'contradicts': clash, 'duplicate_of': dup,
             'source': {'id': str(src['id']), 'name': src['name']} if src else None, 'source_names': names}
 
@@ -605,7 +613,26 @@ def _decide(col, kid, u, fn, action, **kw):
 
 @router.post('/collections/{ref}/conflicts/{kid}/approve')
 def approve_conflict(ref: str, kid: int, u=Depends(auth.current_user), sc=Depends(scope_of)):
-    return _decide(S.open_collection(sc, ref, 'write'), kid, u, topics_mod.approve, 'approve_change')
+    """Approve a held change. When the page has to be written again by the AI model (it changed since the change was held, or the change contradicts
+    it), that runs in the background: -> {'status': 'approving'}; the conflict shows the progress. Otherwise it is published at once: {'status': 'approved'}."""
+    col = S.open_collection(sc, ref, 'write')
+    k = topics_mod.conflict_detail(col.id, kid)
+    if not k or k['status'] != 'open':
+        raise HTTPException(404, 'no such open conflict')
+    if topics_mod.approval_needs_writer(col.id, kid):
+        if not (S.trusted(col.id).allow_ai and llm.available()):
+            raise HTTPException(409, 'The page has changed since this change was held, so approving it means writing the page again with the AI model, and '
+                                + ('this collection does not allow AI.' if not S.trusted(col.id).allow_ai else 'no AI model is set (Settings, Alfred and AI).')
+                                + ' Reject it, or approve it once a model can be used.')
+        if topics_mod.queue_approval(col.id, kid, u['username']):
+            _audit(u['username'], 'approve_change', col.id, after={'conflict': kid, 'in_background': True})
+        return {'ok': True, 'status': 'approving'}
+    try:
+        version = topics_mod.approve(col.id, kid, u['username'])
+    except LookupError:
+        raise HTTPException(404, 'no such open conflict')
+    _audit(u['username'], 'approve_change', col.id, after={'conflict': kid})
+    return {'ok': True, 'status': 'approved', 'version': version}
 
 
 @router.post('/collections/{ref}/conflicts/{kid}/reject')

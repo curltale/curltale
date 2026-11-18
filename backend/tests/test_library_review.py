@@ -60,10 +60,21 @@ def test_a_contradiction_is_held_and_the_published_page_does_not_change_until_a_
     assert client.get(f"/api/library/collections/{a}/conflicts").status_code == 403
     assert client.post(f"/api/library/collections/{a}/conflicts/{ks[0]['id']}/approve").status_code == 403
     _as(client, 'ann')
-    assert client.post(f"/api/library/collections/{a}/conflicts/{ks[0]['id']}/approve").status_code == 200
+    r = client.post(f"/api/library/collections/{a}/conflicts/{ks[0]['id']}/approve")
+    assert r.status_code == 200 and r.json()['status'] == 'approving'                                 # the page is written again in the background
+    d = client.get(f"/api/library/collections/{a}/conflicts/{ks[0]['id']}").json()
+    assert d['conflict']['status'] == 'open' and d['approval']['status'] == 'approving' and d['approval']['by'] == 'ann'
+    assert client.get(f'/api/library/collections/{a}/inbox').json()['held_changes'][0]['approving'] is True
+    assert client.post(f"/api/library/collections/{a}/conflicts/{ks[0]['id']}/approve").json()['status'] == 'approving'     # a second click queues nothing more
+    with db.conn() as c:
+        assert c.execute("SELECT count(*) AS n FROM library.job WHERE kind='topic.approve'").fetchone()['n'] == 1
+    assert _topic(client, a)['version'] == 1                                                          # readers see the old page until it is written
+    _run()
     t = _topic(client, a)
     texts = {c['n']: c['text'] for c in t['claims']}
-    assert t['version'] == 2 and 'fourteen days' in texts[3] and 1 not in texts and 2 in texts                       # the contradicted statement is superseded, the new one stands
+    assert t['version'] == 3 and 'fourteen days' in texts[3] and 1 not in texts and 2 in texts                       # the contradicted statement is superseded, the new one stands
+    assert 'approved by ann, applied on top of version 1' in t['versions'][0]['update_reason'] and [v['version'] for v in t['versions']] == [3, 1]     # published on top; the held version stays as reviewed
+    assert client.get(f"/api/library/collections/{a}/conflicts/{ks[0]['id']}").json()['conflict']['status'] == 'approved'
     assert client.post(f"/api/library/collections/{a}/conflicts/{ks[0]['id']}/approve").status_code == 404
     assert client.get('/api/status').json()['library_review'] == 0
 
@@ -204,6 +215,7 @@ def test_the_collections_inbox_is_one_queue_for_everyone_who_can_write_and_the_m
     assert len(ed['held_changes']) == 1 and ed['vocabulary']['can_decide'] is False and client.get('/api/status').json()['library_review'] == 2
     k = ed['held_changes'][0]['id']
     assert client.post(f'/api/library/collections/{a}/conflicts/{k}/approve').status_code == 200       # an editor decides on content...
+    _run()
     pid = ed['vocabulary']['proposals'][0]['id']
     assert client.post(f'/api/library/collections/{a}/vocabulary/proposals/{pid}', json={'approve': True}).status_code == 403          # ...not on the vocabulary
     assert client.post(f'/api/library/collections/{a}/topics/premium-plan/model-links/decide', json={'kind': 'entity', 'ref': 'customer', 'accept': True}).status_code == 200
@@ -238,4 +250,70 @@ def test_a_held_change_does_not_count_its_source_until_approved(client, world, g
     assert [s['name'] for s in t['sources']] == ['one.md']                                              # the held source is not listed yet
     k = client.get(f'/api/library/collections/{a}/conflicts').json()['conflicts'][0]
     assert client.post(f"/api/library/collections/{a}/conflicts/{k['id']}/approve").status_code == 200
+    _run()
     assert sorted(s['name'] for s in _topic(client, a)['sources']) == ['one.md', 'two.md']
+
+
+def test_an_approval_lands_on_top_of_a_page_published_after_the_change_was_held(client, world, gate, monkeypatch):
+    """The bug of 0.3.0: a revision published while a change waited, and the approval wrote into the older held version, so readers never saw it."""
+    a = world['a']['id']
+    gate([analysis(dict(REFUNDS, links=[])), analysis(_contradiction())])
+    _two_sources(client, a, None)
+    k = client.get(f'/api/library/collections/{a}/conflicts').json()['conflicts'][0]
+    t = _topic(client, a)
+    with db.conn() as c:
+        row = c.execute("SELECT id, collection_id FROM library.topic WHERE slug='refund-policy'").fetchone()
+    later = t['markdown'].rstrip() + '\n- Refunds are paid to the original card. [c2]\n'
+    assert topics.store_version(row['collection_id'], row['id'], later, 'a revision published meanwhile') == 3
+    d = client.get(f"/api/library/collections/{a}/conflicts/{k['id']}").json()
+    assert d['page_moved_on'] is True and 'original card' in d['current']
+    seen = {}
+    def writer(cid, sid, cand, source_md, existing, *a_, strict=False, **kw):
+        seen.update(existing=existing, strict=strict, claims=[x['text'] for x in cand['claims']])
+        return '# Refund policy\n\n- A yearly plan is refundable within fourteen days. [c3]\n- Refunds are paid to the original card. [c2]\n'
+    monkeypatch.setattr(topics, 'write_topic_markdown', writer)
+    assert client.post(f"/api/library/collections/{a}/conflicts/{k['id']}/approve").json()['status'] == 'approving'
+    _run()
+    t = _topic(client, a)
+    assert t['version'] == 4 and 'fourteen days' in t['markdown'] and 'original card' in t['markdown']        # the newest page, with the change, is what readers get
+    assert seen['strict'] is True and 'original card' in seen['existing'] and any('fourteen' in x for x in seen['claims'])     # written on top of the page published meanwhile
+
+
+def test_a_failed_writer_leaves_the_change_open_and_the_topic_untouched(client, world, gate, monkeypatch):
+    a = world['a']['id']
+    gate([analysis(dict(REFUNDS, links=[])), analysis(_contradiction())])
+    _two_sources(client, a, None)
+    k = client.get(f'/api/library/collections/{a}/conflicts').json()['conflicts'][0]
+    before = _topic(client, a)
+    def broken(*a_, **kw):
+        raise topics.WriterFailed('the AI model could not write the page (TimeoutError: no answer)')
+    monkeypatch.setattr(topics, 'write_topic_markdown', broken)
+    assert client.post(f"/api/library/collections/{a}/conflicts/{k['id']}/approve").json()['status'] == 'approving'
+    _run()
+    d = client.get(f"/api/library/collections/{a}/conflicts/{k['id']}").json()
+    assert d['conflict']['status'] == 'open' and d['approval']['status'] == 'failed' and 'could not write the page' in d['approval']['error'] and not d['approval']['error'].startswith('Permanent')
+    after = _topic(client, a)
+    assert after['version'] == before['version'] and [c['n'] for c in after['claims']] == [c['n'] for c in before['claims']]     # no claim moved
+    assert all(c['status'] == 'pending' for c in d['new_claims'])
+    monkeypatch.undo()                                                                                 # the model works again: approving again goes through
+    gate([])
+    assert client.post(f"/api/library/collections/{a}/conflicts/{k['id']}/approve").json()['status'] == 'approving'
+    _run()
+    assert client.get(f"/api/library/collections/{a}/conflicts/{k['id']}").json()['conflict']['status'] == 'approved'
+
+
+def test_without_an_ai_model_an_approval_that_needs_the_writer_is_refused_and_one_that_does_not_is_instant(client, world, gate, monkeypatch):
+    a = world['a']['id']
+    gate([analysis(dict(REFUNDS, links=[])), analysis(_contradiction())])
+    _two_sources(client, a, None)
+    k = client.get(f'/api/library/collections/{a}/conflicts').json()['conflicts'][0]
+    from studio import llm
+    monkeypatch.setattr(llm, 'available', lambda: False)
+    r = client.post(f"/api/library/collections/{a}/conflicts/{k['id']}/approve")
+    assert r.status_code == 409 and 'no AI model is set' in r.json()['detail']
+    assert client.get(f"/api/library/collections/{a}/conflicts/{k['id']}").json()['conflict']['status'] == 'open'
+    with db.conn() as c:                                                                               # a held change that contradicts nothing, on an unchanged page
+        c.execute('UPDATE library.topic_conflict SET contradicts_n=NULL WHERE id=%s', (k['id'],))
+    r = client.post(f"/api/library/collections/{a}/conflicts/{k['id']}/approve")
+    assert r.status_code == 200 and r.json() == {'ok': True, 'status': 'approved', 'version': 2}       # published at once, no model needed
+    assert _topic(client, a)['version'] == 2

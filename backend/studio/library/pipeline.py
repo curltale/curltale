@@ -258,6 +258,22 @@ def revise_topic(job, ctx):
     ctx.progress(result, 100)
 
 
+@jobs.handler('topic.approve')
+def approve_change(job, ctx):
+    """A held change a person approved, when the page has to be written again by the AI model first. A failure leaves the change open, and the
+    person sees why on the review page and can approve it again."""
+    col, kid = job['collection_id'], int((job['payload'] or {}).get('conflict_id') or 0)
+    ctx.progress('writing the page with the approved change', 20)
+    try:
+        version = topics.approve(col, kid, job['created_by'] or 'system')
+    except LookupError:
+        ctx.progress('already decided', 100)
+        return
+    except (topics.WriterFailed, topics.WriterUnavailable) as e:
+        raise jobs.Permanent(str(e))
+    ctx.progress(f'published as version {version}', 100)
+
+
 @jobs.handler('topic.link_model')
 def link_model(job, ctx):
     """Connect new and changed topics to the entities of the governed model they are about."""

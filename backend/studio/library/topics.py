@@ -293,7 +293,7 @@ def _candidate_json(topic):
             'links': [{'target_title': l['target'], 'relation_type': l['relation'], 'context': l.get('context', '')} for l in topic.get('links') or []]}
 
 
-def write_topic_markdown(cid, sid, topic, source_markdown, existing_markdown='', old_claims=None, flags=None):
+def write_topic_markdown(cid, sid, topic, source_markdown, existing_markdown='', old_claims=None, flags=None, strict=False):
     """The topic page, written (or amended) from the candidate and the full verified source wiki, with tools to read related topics and other approved
     source wikis of the collection. Output that is not a Markdown page falls back to a plain page built from the candidate. Disagreements the writer
     reports with flag_conflict are appended to `flags` (a list) when one is given."""
@@ -313,13 +313,17 @@ def write_topic_markdown(cid, sid, topic, source_markdown, existing_markdown='',
     tools = TopicWriterTools(cid, sid)
     try:
         text, _ = llm.chat_tools(msgs, WRITER_TOOLS, tools, role='topic_writer', max_rounds=12, max_tokens=12000, temperature=0.2)
-    except Exception:
+    except Exception as e:
+        if strict:                                                                     # a page a person approved must not become the plain fallback
+            raise WriterFailed(f'the AI model could not write the page ({type(e).__name__}: {str(e)[:160]})')
         text = ''
     if flags is not None:
         flags.extend(tools.flags)
-    md = (text or '').strip().lstrip('﻿')
+    md = (text or '').strip().lstrip('\ufeff')
     if not md.startswith('#'):
         md = wiki._strip_preamble(md)
+    if not md.startswith('#') and strict:
+        raise WriterFailed('the AI model did not return a page')
     return md if md.startswith('#') else _fallback_page(topic, sid)
 
 
@@ -609,9 +613,53 @@ def conflict_detail(cid, conflict_id):
     return k
 
 
+class WriterFailed(RuntimeError):
+    """The AI model could not write a page that has to be written (an approved change): nothing was changed."""
+
+
+class WriterUnavailable(RuntimeError):
+    """A page has to be written but no AI model may be used for this collection."""
+
+
+def _approval_plan(c, k):
+    """-> (current published version, whether the held page has to be written again on top of it). It has when the published page moved on since the
+    change was held (another update or a revision was published meanwhile), or when the change contradicts a statement the page makes."""
+    current = _published_version(c, k['topic_id'])
+    stale = (current or None) != (k['base_version'] or None)
+    return current, bool(current) and (stale or k['contradicts_n'] is not None)
+
+
+def approval_needs_writer(cid, conflict_id):
+    k = conflict_detail(cid, conflict_id)
+    if not k or k['status'] != 'open':
+        return False
+    with conn() as c:
+        return _approval_plan(c, k)[1]
+
+
+def approval_job(cid, conflict_id):
+    """The latest background approval of this held change, if any: {'status', 'error', 'progress'}."""
+    with conn() as c:
+        return c.execute("SELECT status, error, progress, created_by FROM library.job WHERE kind='topic.approve' AND collection_id=%s AND payload->>'conflict_id'=%s ORDER BY id DESC LIMIT 1",
+                         (cid, str(conflict_id))).fetchone()
+
+
+def queue_approval(cid, conflict_id, user):
+    """Approve in the background (the page is written again by the AI model). -> False when an approval of this change is already waiting or running."""
+    with conn() as c:
+        if c.execute("SELECT 1 FROM library.job WHERE kind='topic.approve' AND collection_id=%s AND payload->>'conflict_id'=%s AND status IN ('queued','running')",
+                     (cid, str(conflict_id))).fetchone():
+            return False
+        c.execute("INSERT INTO library.job (kind,collection_id,payload,created_by,max_attempts) VALUES ('topic.approve',%s,%s,%s,1)", (cid, J({'conflict_id': conflict_id}), user))
+    return True
+
+
 def approve(cid, conflict_id, user):
-    """Publish the held version: its claims become active (the source's earlier claims on the topic are superseded), a contradicted claim is superseded.
-    If the published page moved on meanwhile, or a claim was contradicted, the page is written again on top of the current one from the source wiki."""
+    """Publish the held change: its claims become active (the source's earlier claims on the topic are superseded), a contradicted claim is superseded.
+    If the published page moved on since the change was held, or a claim was contradicted, the page is first written again by the AI model on top of
+    the current page and published as a new version (the held version stays as the record of what was reviewed); otherwise the held version itself
+    is published. The page is written before anything changes, and everything changes in one transaction, so a failed writer leaves the change open
+    and the topic as it was. -> the published version."""
     k = conflict_detail(cid, conflict_id)
     if not k or k['status'] != 'open':
         raise LookupError('no such open conflict')
@@ -620,8 +668,18 @@ def approve(cid, conflict_id, user):
         held = c.execute('SELECT markdown FROM library.topic_version WHERE topic_id=%s AND version=%s', (tid, k['version'])).fetchone()
         pending = c.execute("SELECT cl.id, cl.n, cl.text, cl.kind, cs.quote FROM library.claim cl JOIN library.claim_source cs ON cs.claim_id=cl.id AND cs.source_id=%s WHERE cl.topic_id=%s AND cl.status='pending'",
                             (sid, tid)).fetchall() if sid else []
-        current = _published_version(c, tid)
-        markdown, stale = held['markdown'], (current or None) != (k['base_version'] or None)
+        current, rewrite = _approval_plan(c, k)
+        row = c.execute('SELECT title, topic_type, summary, slug FROM library.topic WHERE id=%s', (tid,)).fetchone()
+    markdown = held['markdown']
+    if rewrite:                                                                        # the held page was written beside a page that has since changed
+        if not (llm.available() and S.trusted(cid).allow_ai):
+            raise WriterUnavailable('the page has to be written again with the AI model, and no AI model may be used for this collection')
+        _, wiki_md = index.approved_wiki(cid, sid) if sid else (None, None)
+        cand = {**row, 'claims': [{'text': p['text'], 'kind': p['kind'], 'quote': p['quote']} for p in pending], 'aliases': [], 'links': []}
+        markdown = write_topic_markdown(cid, sid, cand, wiki_md or markdown, current_markdown(tid), strict=True)
+    with conn() as c:
+        if c.execute('SELECT status FROM library.topic_conflict WHERE id=%s FOR UPDATE', (conflict_id,)).fetchone()['status'] != 'open':
+            raise LookupError('no such open conflict')                                 # decided by someone else while the page was written
         if sid:
             c.execute("UPDATE library.claim SET status='superseded', superseded_at=now() WHERE topic_id=%s AND status='active' AND id IN (SELECT claim_id FROM library.claim_source WHERE source_id=%s) AND NOT (id = ANY(%s))",
                       (tid, sid, [p['id'] for p in pending]))
@@ -631,20 +689,20 @@ def approve(cid, conflict_id, user):
         if sid:                                                                         # the source now counts for this topic
             c.execute('INSERT INTO library.topic_source (collection_id,topic_id,source_id,wiki_version) SELECT %s,%s,%s,max(version) FROM library.wiki_version WHERE source_id=%s '
                       'ON CONFLICT (topic_id, source_id) DO UPDATE SET wiki_version=EXCLUDED.wiki_version', (cid, tid, sid, sid))
-        row = c.execute('SELECT title, topic_type, summary, slug FROM library.topic WHERE id=%s', (tid,)).fetchone()
-    if (stale or k['contradicts_n'] is not None) and current:                          # the held page was written beside facts that have since changed
-        _, wiki_md = index.approved_wiki(cid, sid) if sid else (None, None)
-        cand = {**row, 'claims': [{'text': p['text'], 'kind': p['kind'], 'quote': p['quote']} for p in pending], 'aliases': [], 'links': []}
-        markdown = write_topic_markdown(cid, sid, cand, wiki_md or markdown, current_markdown(tid))
-        with conn() as c:
-            c.execute("UPDATE library.topic_version SET markdown=%s WHERE topic_id=%s AND version=%s", (markdown, tid, k['version']))
-        index.index_topic(cid, tid, k['version'], markdown)
-    with conn() as c:
-        c.execute("UPDATE library.topic_version SET status='published' WHERE topic_id=%s AND version=%s", (tid, k['version']))
+        if rewrite:
+            ver = _version(c, tid)
+            c.execute("INSERT INTO library.topic_version (collection_id,topic_id,version,markdown,update_reason,status) VALUES (%s,%s,%s,%s,%s,'published')",
+                      (cid, tid, ver, markdown, f"Held change (version {k['version']}) approved by {user}, applied on top of version {current}"))
+        else:
+            ver = k['version']
+            c.execute("UPDATE library.topic_version SET status='published' WHERE topic_id=%s AND version=%s", (tid, ver))
         c.execute("UPDATE library.topic SET status='active', needs_revision=false, updated_at=now() WHERE id=%s", (tid,))
         c.execute("UPDATE library.topic_conflict SET status='approved', decided_by=%s, decided_at=now() WHERE id=%s", (user, conflict_id))
+    if rewrite:                                                                        # a held version was indexed when it was stored
+        index.index_topic(cid, tid, ver, markdown)
     index.embed_topic(cid, tid)
     embed_missing(cid)
+    return ver
 
 
 def reject(cid, conflict_id, user):

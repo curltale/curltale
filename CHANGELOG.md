@@ -2,6 +2,15 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [0.3.1] - 2026-11-18
+
+### Fixed
+- **An approved change now always reaches readers.** When a topic page was updated while a change waited for review, approving the change published it into the older version, so readers kept seeing the newer page without it. The approved change is now written on top of the page readers see and published as a new version; the held version stays as the record of what was reviewed.
+- **A failed approval changes nothing.** The page is written before any statement changes, and everything is then saved at once. If the AI model fails, the change stays open with the reason, instead of the page becoming a plain list of facts.
+
+### Changed
+- **Approvals that need the AI model run in the background**, with feedback. The review page says when the page changed since the change was held, the buttons show what they are doing, the change is marked *approving…* in the queue while the page is written, and the page confirms when it is published or says why it failed. Approvals that need no model are published at once, with a confirmation. Without an AI model for the collection, such an approval is refused with the reason.
+
 ## [0.3.0] - 2026-11-18
 
 ### Added

@@ -75,6 +75,7 @@ tr.click:hover td { background: var(--panel-2); cursor: pointer; }
 .pill.bad { background: var(--bad-soft); color: var(--bad); } .pill.accent { background: var(--accent-soft); color: var(--accent); }
 .banner { padding: 10px 14px; border-radius: 9px; margin-bottom: 14px; background: var(--warn-soft); color: var(--warn); }
 .banner.bad { background: var(--bad-soft); color: var(--bad); } .banner.ok { background: var(--ok-soft); color: var(--ok); }
+.banner.info { background: var(--accent-soft); color: var(--accent); }
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 18px 0 14px; }
 .tabs button { background: none; border: none; padding: 8px 14px; cursor: pointer; color: var(--muted); font: inherit; border-bottom: 2px solid transparent; }
 .tabs button.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }

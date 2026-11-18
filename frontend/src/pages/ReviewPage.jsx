@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api.js'
 import SafeMarkdown from '../components/SafeMarkdown.jsx'
 import { Pill } from '../components/ui.jsx'
@@ -36,7 +36,7 @@ export function ReviewList() {
         <Section title="Held changes" hint="They contradict a published page, or look like an existing topic. Readers still see the old page." count={d.held_changes.length}>
           {d.held_changes.map((k) => (
             <Link key={k.id} to={`/library/review/${k.id}?c=${cid}`} style={{ display: 'block', color: 'inherit', textDecoration: 'none', padding: '10px 0', borderTop: '1px solid var(--line)' }}>
-              <div className="row"><strong>{k.title}</strong><Pill tone={KIND[k.kind][1]}>{KIND[k.kind][0]}</Pill><span className="right small muted">{new Date(k.created_at).toLocaleString()}</span></div>
+              <div className="row"><strong>{k.title}</strong><Pill tone={KIND[k.kind][1]}>{KIND[k.kind][0]}</Pill>{k.approving && <Pill tone="accent">approving…</Pill>}<span className="right small muted">{new Date(k.created_at).toLocaleString()}</span></div>
               <div className="small muted" style={{ marginTop: 4 }}>{k.description}</div></Link>))}
         </Section>
         <Section title="Source pages with objections" hint="The checker still disagrees with the page after its corrections." count={d.pages.length}>
@@ -68,32 +68,59 @@ export function ReviewList() {
   )
 }
 
+const DONE = {
+  approved: 'Approved. Readers now see the page with this change.',
+  rejected: 'Rejected. The page stays as it was.',
+  redirected: 'Merged into the existing topic.',
+}
+
 export function ConflictPage() {
   const { kid } = useParams()
   const [params] = useSearchParams()
-  const cid = params.get('c'), nav = useNavigate()
-  const [d, setD] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(false)
-  useEffect(() => { api.get(`/api/library/collections/${cid}/conflicts/${kid}`).then(setD).catch((e) => setErr(e.message)) }, [kid, cid])
-  const act = async (what, body) => { setBusy(true); try { await api.post(`/api/library/collections/${cid}/conflicts/${kid}/${what}`, body); nav(`/library/review?c=${cid}`) } catch (e) { setErr(e.message) } setBusy(false) }
-  if (err) return <div className="banner bad">{err} <Link to={`/library/review?c=${cid}`}>Back</Link></div>
-  if (!d) return <p className="muted">Loading…</p>
+  const cid = params.get('c')
+  const [d, setD] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(''), [notice, setNotice] = useState('')
+  const url = `/api/library/collections/${cid}/conflicts/${kid}`
+  const load = () => api.get(url).then((x) => { setD(x); return x }).catch((e) => setErr(e.message))
+  useEffect(() => { load() }, [kid, cid])
+  const approving = d?.conflict.status === 'open' && d?.approval?.status === 'approving'
+  useEffect(() => {                                                       // the page is being written in the background: follow it until it is decided
+    if (!approving) return
+    const t = setInterval(() => { load().then((x) => { if (x && x.conflict.status === 'approved') setNotice(DONE.approved) }) }, 3000)
+    return () => clearInterval(t)
+  }, [approving])
+  const act = async (what, body, label) => {
+    setBusy(label); setErr(''); setNotice('')
+    try {
+      const r = await api.post(`${url}/${what}`, body)
+      const x = await load()
+      if (r?.status !== 'approving') setNotice(DONE[x?.conflict.status] || 'Done.')
+    } catch (e) { setErr(e.message) }
+    setBusy('')
+  }
+  if (!d) return err ? <div className="banner bad">{err} <Link to={`/library/review?c=${cid}`}>Back</Link></div> : <p className="muted">Loading…</p>
   const k = d.conflict, canWrite = d.collection.level === 'write' || d.collection.level === 'manage', open = k.status === 'open'
+  const back = <Link to={`/library/review?c=${cid}`}>Back to review</Link>
   return (
     <>
       <div className="small muted" style={{ marginBottom: 8 }}><Link to={`/library/review?c=${cid}`}>Review</Link> / {d.collection.name}</div>
       <h1>{d.topic.title}</h1>
       <div className="row" style={{ marginBottom: 10 }}><Pill tone={KIND[k.kind][1]}>{KIND[k.kind][0]}</Pill>{!open && <Pill tone={k.status === 'rejected' ? 'bad' : 'ok'}>{k.status} by {k.decided_by}</Pill>}{d.source && <span className="small muted">from <Link to={`/library/sources/${d.source.id}?c=${cid}`}>{d.source.name}</Link></span>}</div>
+      {notice && <div className="banner ok">{notice} {k.status !== 'rejected' && d.topic.status !== 'archived' && <Link to={`/library/topics/${d.topic.slug}?c=${cid}`}>Open the topic</Link>} · {back}</div>}
+      {err && <div className="banner bad">{err}</div>}
+      {approving && <div className="banner info">Approving: the AI model is writing the page again with this change, on top of the page readers see now. This usually takes a minute or two. You can leave this page; the change stays in the review queue, marked approving, until it is published.</div>}
+      {open && d.approval?.status === 'failed' && <div className="banner bad">The last approval did not go through: {d.approval.error}. Nothing was changed; you can approve it again.</div>}
       <div className="banner">{k.description}</div>
+      {open && d.page_moved_on && !approving && <div className="banner warn">The page has changed since this was held (another update was published). Approving writes the page again with the AI model, applying this change on top of the current page, so the result can differ from the preview below.</div>}
       {d.contradicts && <div className="card" style={{ marginBottom: 14, borderColor: 'var(--warn)' }}><div className="small muted">The claim it contradicts</div><div style={{ marginTop: 4 }}><b>{d.contradicts.n}.</b> {d.contradicts.text}</div></div>}
       {d.duplicate_of && <div className="card" style={{ marginBottom: 14 }}><div className="small muted">Existing topic it resembles</div><div style={{ marginTop: 4 }}><Link to={`/library/topics/${d.duplicate_of.slug}?c=${cid}`}><b>{d.duplicate_of.title}</b></Link>: {d.duplicate_of.summary}</div></div>}
-      {open && canWrite && <div className="row" style={{ marginBottom: 14 }}>
-        <button className="btn primary" disabled={busy} onClick={() => act('approve')}>{k.kind === 'duplicate_topic' ? 'Keep it as a separate topic' : 'Approve the change'}</button>
-        {k.kind === 'duplicate_topic' && d.duplicate_of && <button className="btn" disabled={busy} onClick={() => act('redirect', {})}>Merge into “{d.duplicate_of.title}”</button>}
-        <button className="btn danger" disabled={busy} onClick={() => act('reject')}>Reject</button></div>}
+      {open && canWrite && !approving && <div className="row" style={{ marginBottom: 14 }}>
+        <button className="btn primary" disabled={!!busy} onClick={() => act('approve', undefined, 'approve')}>{busy === 'approve' ? 'Approving…' : k.kind === 'duplicate_topic' ? 'Keep it as a separate topic' : 'Approve the change'}</button>
+        {k.kind === 'duplicate_topic' && d.duplicate_of && <button className="btn" disabled={!!busy} onClick={() => act('redirect', {}, 'redirect')}>{busy === 'redirect' ? 'Merging…' : `Merge into “${d.duplicate_of.title}”`}</button>}
+        <button className="btn danger" disabled={!!busy} onClick={() => act('reject', undefined, 'reject')}>{busy === 'reject' ? 'Rejecting…' : 'Reject'}</button></div>}
       {open && !canWrite && <p className="small muted">You can read this but not decide: that needs write access and the editor role.</p>}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'flex-start' }}>
-        {k.kind === 'contradiction' && <div className="card" style={{ flex: '1 1 380px', minWidth: 0 }}><div className="small muted" style={{ marginBottom: 6 }}>Published now</div><div className="article">{d.current ? <SafeMarkdown sources={{ cid, names: d.source_names }} topics={{ cid }}>{d.current}</SafeMarkdown> : <p className="muted">Nothing published.</p>}</div></div>}
-        <div className="card" style={{ flex: '1 1 380px', minWidth: 0, borderColor: 'var(--accent)' }}><div className="small muted" style={{ marginBottom: 6 }}>{k.kind === 'contradiction' ? 'As it would become' : 'The new topic'}</div><div className="article">{d.proposed && <SafeMarkdown sources={{ cid, names: d.source_names }} topics={{ cid }}>{d.proposed}</SafeMarkdown>}</div></div>
+        {k.kind === 'contradiction' && <div className="card" style={{ flex: '1 1 380px', minWidth: 0 }}><div className="small muted" style={{ marginBottom: 6 }}>{open ? 'Published now' : 'Published when this was decided'}</div><div className="article">{d.current ? <SafeMarkdown sources={{ cid, names: d.source_names }} topics={{ cid }}>{d.current}</SafeMarkdown> : <p className="muted">Nothing published.</p>}</div></div>}
+        <div className="card" style={{ flex: '1 1 380px', minWidth: 0, borderColor: 'var(--accent)' }}><div className="small muted" style={{ marginBottom: 6 }}>{k.kind === 'contradiction' ? (open ? 'As it would become' : 'The change as it was reviewed') : 'The new topic'}</div><div className="article">{d.proposed && <SafeMarkdown sources={{ cid, names: d.source_names }} topics={{ cid }}>{d.proposed}</SafeMarkdown>}</div></div>
         <div className="card" style={{ flex: '1 1 300px', minWidth: 0 }}>
           <strong>New claims</strong>
           {d.new_claims.map((c) => (
