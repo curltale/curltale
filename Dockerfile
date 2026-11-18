@@ -10,6 +10,11 @@ RUN npx vite build
 FROM python:3.13.17-slim
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
+# Tesseract: local OCR for scanned pages and images when no AI model reads them (studio/library/localocr.py). English is always installed;
+# add languages at build time with Debian's codes, e.g. --build-arg OCR_LANGS="ita fra deu ara" (each about 5-20 MB)
+ARG OCR_LANGS=""
+RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng $(for l in $OCR_LANGS; do printf 'tesseract-ocr-%s ' "$l"; done) \
+    && rm -rf /var/lib/apt/lists/*
 # exact versions with hashes; --no-deps because the lock lists every package (and overrides fastembed's pillow pin, see requirements.lock)
 COPY backend/requirements.lock ./
 RUN pip install --require-hashes --no-deps -r requirements.lock

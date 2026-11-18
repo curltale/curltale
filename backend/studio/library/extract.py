@@ -23,7 +23,69 @@ class Extracted:
     title: str | None = None
     pages: int | None = None                  # pages, slides or sheets
     ocr_pages: int = 0
+    local_ocr_pages: int = 0                  # of those, read by local OCR rather than an AI model
     notes: list = field(default_factory=list)
+
+
+@dataclass
+class OcrText:
+    """What an OCR function may return instead of plain text: how the page was read and whether it is good enough to keep."""
+    text: str
+    label: str = 'OCR'                        # shown after the place: "Page 3 (local OCR)"
+    confidence: float | None = None           # 0-100, when the reader gives one
+    rejected: bool = False                    # read, but with too little confidence to be used as a source
+
+
+def _ocr_result(got):
+    return got if isinstance(got, OcrText) else OcrText(got or '')
+
+
+def _ocr_notes(local, low):
+    notes = []
+    if local:
+        notes.append(f'{local} page(s) read with local OCR (Tesseract), which misreads more than an AI model: check figures against the original')
+    if low:
+        shown = ', '.join(f'{p}: {c:.0f}%' if p else f'{c:.0f}%' for p, c in low[:5]) + (' ...' if len(low) > 5 else '')
+        notes.append(f'{len(low)} page(s) left out: local OCR read them with too little confidence ({shown})')
+    return notes
+
+
+def table_lines(rows):
+    """A table's rows -> lines that keep each value with its column, so a row still reads correctly when it is quoted or cut from its header:
+    'Row 2: Tier: Tier 2; Max overtime: 16'. Empty cells are skipped without moving the others. A cell merged across columns is None after its
+    first column: in the header it names every column it spans, in a row it is not repeated. A table of one row or one column (often only
+    layout) is read as plain lines."""
+    rows = [[None if c is None else ' '.join(c.split()) for c in r] for r in rows]
+    rows = [r for r in rows if any(r)]
+    if not rows:
+        return []
+    if len(rows) == 1 or max(len(r) for r in rows) == 1:
+        return [' | '.join(c for c in r if c) for r in rows]
+    head, prev = [], ''
+    for i, h in enumerate(rows[0]):
+        prev = prev if h is None else (h or f'Column {i + 1}')
+        head.append(prev)
+    out = [' | '.join(c for c in rows[0] if c)]
+    for n, r in enumerate(rows[1:], 1):
+        pairs = {}
+        for i, v in enumerate(r):
+            if v:
+                pairs.setdefault(head[i] if i < len(head) else f'Column {i + 1}', []).append(v)
+        if pairs:
+            out.append(f'Row {n}: ' + '; '.join(f'{h}: {", ".join(vs)}' for h, vs in pairs.items()))
+    return out
+
+
+def _cells(row):
+    """A Word or PowerPoint row's cell texts, one per grid column; a cell merged across columns is None after the first."""
+    out, last = [], None
+    for c in row.cells:
+        if getattr(c, 'is_spanned', False) or (last is not None and c._tc is last):     # PowerPoint marks spanned cells, Word repeats the merged one
+            out.append(None)
+            continue
+        last = c._tc
+        out.append(c.text)
+    return out
 
 
 def normalize(text):
@@ -116,17 +178,17 @@ def docx_to_text(content):
     doc = Document(io.BytesIO(content))
     title = (doc.core_properties.title or '').strip() or None
     parts = []
-    for p in doc.paragraphs:
-        t = p.text.strip()
+    for item in doc.iter_inner_content():                                 # paragraphs and tables in the order they appear
+        if hasattr(item, 'rows'):
+            lines = table_lines([_cells(r) for r in item.rows])
+            if lines:
+                parts.append('\n'.join(lines))
+            continue
+        t = item.text.strip()
         if not t:
             continue
-        m = re.match(r'Heading (\d)', p.style.name or '') if p.style is not None else None
+        m = re.match(r'Heading (\d)', item.style.name or '') if item.style is not None else None
         parts.append(('#' * int(m.group(1)) + ' ' + t) if m else t)
-    for table in doc.tables:
-        for row in table.rows:
-            cells = [c.text.strip() for c in row.cells if c.text.strip()]
-            if cells:
-                parts.append(' | '.join(cells))
     return normalize('\n\n'.join(parts)), title
 
 
@@ -136,10 +198,12 @@ def pptx_to_text(content):
     prs = Presentation(io.BytesIO(content))
     title, parts, slides = None, [], 0
     for i, slide in enumerate(prs.slides, 1):
-        texts = [p.text.strip() for sh in slide.shapes if sh.has_text_frame for p in sh.text_frame.paragraphs if p.text.strip()]
-        for sh in slide.shapes:
-            if getattr(sh, 'has_table', False) and sh.has_table:
-                texts += [' | '.join(c.text.strip() for c in r.cells if c.text.strip()) for r in sh.table.rows]
+        texts = []
+        for sh in slide.shapes:                                           # text boxes and tables in the slide's own order
+            if sh.has_text_frame:
+                texts += [p.text.strip() for p in sh.text_frame.paragraphs if p.text.strip()]
+            elif getattr(sh, 'has_table', False) and sh.has_table:
+                texts += table_lines([_cells(r) for r in sh.table.rows])
         if slide.has_notes_slide and slide.notes_slide.notes_text_frame is not None:
             n = slide.notes_slide.notes_text_frame.text.strip()
             if n:
@@ -175,8 +239,8 @@ def pdf_to_text(content, ocr=None, max_ocr_pages=100):
         else:
             todo = set(scanned)
     elif scanned:
-        notes.append(f'{len(scanned)} page(s) have no text and no OCR model is set (Settings, Alfred and AI)')
-    parts, done = [], 0
+        notes.append(f'{len(scanned)} page(s) have no text, no OCR model is set (Settings, Alfred and AI) and local OCR is not available')
+    parts, done, local, low, blank = [], 0, 0, [], []
     pdf = None
     try:
         for i, t in enumerate(native):
@@ -188,19 +252,28 @@ def pdf_to_text(content, ocr=None, max_ocr_pages=100):
                     pdf = pypdfium2.PdfDocument(content)
                 buf = io.BytesIO()
                 pdf[i].render(scale=2).to_pil().convert('RGB').save(buf, 'PNG')
-                text = (ocr(buf.getvalue(), 'image/png') or '').strip()
+                r = _ocr_result(ocr(buf.getvalue(), 'image/png'))
+                if r.rejected:
+                    low.append((i + 1, r.confidence or 0))
+                    continue
+                text = r.text.strip()
                 if text:
-                    parts.append(f'Page {i + 1} (OCR)\n{text}')
+                    parts.append(f'Page {i + 1} ({r.label})\n{text}')
                     done += 1
+                    local += r.label != 'OCR'
+                else:
+                    blank.append(i + 1)
     finally:
         if pdf is not None:
             pdf.close()
-    return normalize('\n\n'.join(parts)), meta_title or None, len(native), done, notes
+    if blank:
+        notes.append(f'{len(blank)} scanned page(s) gave no text when read (' + ', '.join(map(str, blank[:8])) + (' ...' if len(blank) > 8 else '') + '): blank, too blurred, or the reader failed')
+    return normalize('\n\n'.join(parts)), meta_title or None, len(native), done, local, notes + _ocr_notes(local, low)
 
 
 def image_to_text(content, ocr):
     if not ocr:
-        return '', ['an image needs an OCR model (Settings, Alfred and AI)']
+        return '', ['an image needs an OCR model (Settings, Alfred and AI) or local OCR'], 0
     from PIL import Image
     try:
         img = Image.open(io.BytesIO(content))
@@ -209,7 +282,12 @@ def image_to_text(content, ocr):
         img.convert('RGB').save(buf, 'PNG')
     except Exception:
         raise ExtractError('the image cannot be read')
-    return normalize(ocr(buf.getvalue(), 'image/png') or ''), []
+    r = _ocr_result(ocr(buf.getvalue(), 'image/png'))
+    if r.rejected:
+        return '', _ocr_notes(0, [(None, r.confidence or 0)]), 0
+    text = normalize(r.text)
+    local = 1 if text and r.label != 'OCR' else 0
+    return text, _ocr_notes(local, []), local
 
 
 TEXT_SUFFIXES = {'.txt', '.md', '.json', '.xml', '.tsv', '.log'}
@@ -223,7 +301,7 @@ def extract(filename, content, ocr=None, max_ocr_pages=100):
     if suffix in ('.html', '.htm'):
         res.text, res.title = html_to_text(_decode(content))
     elif suffix == '.pdf':
-        res.text, res.title, res.pages, res.ocr_pages, res.notes = pdf_to_text(content, ocr, max_ocr_pages)
+        res.text, res.title, res.pages, res.ocr_pages, res.local_ocr_pages, res.notes = pdf_to_text(content, ocr, max_ocr_pages)
     elif suffix == '.docx':
         res.text, res.title = docx_to_text(content)
     elif suffix == '.pptx':
@@ -235,8 +313,8 @@ def extract(filename, content, ocr=None, max_ocr_pages=100):
     elif suffix == '.tsv':
         res.text = csv_to_text(content, '\t')
     elif suffix in IMAGE_SUFFIXES:
-        res.text, res.notes = image_to_text(content, ocr)
-        res.ocr_pages = 1 if res.text else 0
+        res.text, res.notes, local = image_to_text(content, ocr)
+        res.ocr_pages, res.local_ocr_pages = (1 if res.text else 0), local
     elif suffix in TEXT_SUFFIXES:
         res.text = normalize(_decode(content))
     else:

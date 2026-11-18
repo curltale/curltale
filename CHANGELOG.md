@@ -2,6 +2,15 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [0.3.0] - 2026-11-18
+
+### Added
+- **Local OCR.** Scanned pages and images that no AI model reads (none is set, the collection does not allow AI, or the model fails on a page) are now read by Tesseract, included in the image. It runs on the server and sends nothing anywhere. Pages it reads are marked *local OCR*, and the source says how many. A page read with too little confidence is left out with a note instead of becoming a source, because a misread figure would otherwise pass the check against the document. New settings: *Local OCR when no AI model reads a page* (`OCR_LOCAL`, on), *Languages for local OCR* (`OCR_LOCAL_LANGUAGES`, `eng`), *Least confidence for a page read by local OCR* (`OCR_LOCAL_MIN_CONFIDENCE`, 70%). Other languages are added at build time with `--build-arg OCR_LANGS="ita fra"`.
+
+### Changed
+- **Word and PowerPoint tables are read in place.** A table now appears where it is in the document, not after all the text, and each row keeps its values with their column names (*Row 2: Tier: Tier 2; Audit: Every 24 months*), as spreadsheets already did. An empty cell no longer shifts the values after it into the wrong column, and a header merged across columns names each of them. Documents already in a collection keep their text until they are uploaded or refreshed again.
+- A note now says when a scanned page gave no text when read.
+
 ## [0.2.5] - 2026-11-16
 
 ### Changed

@@ -1,7 +1,7 @@
 import io, zipfile
 import pytest
 from studio import config, db, embeddings, vectors
-from studio.library import chunking, extract, jobs, retrieval, scope as S
+from studio.library import chunking, extract, jobs, localocr, retrieval, scope as S
 from test_library_access import world, _as, _admin, MARK_A, MARK_B   # noqa: F401
 from test_library_storage_jobs import _upload
 
@@ -88,6 +88,138 @@ def test_images_need_ocr_and_damaged_or_unsafe_files_are_refused(monkeypatch):
         extract.extract('e.txt', b'   \n\n  ')
 
 
+def test_word_tables_stay_in_place_and_keep_each_value_with_its_column():
+    from docx import Document
+    d = Document(); d.add_paragraph('Limits are set in the table below.')
+    t = d.add_table(rows=3, cols=3)
+    for r, row in enumerate([['Tier', 'Max overtime', 'Audit'], ['Tier 1', '12', 'Every 12 months'], ['Tier 2', '', 'Every 24 months']]):
+        for c, v in enumerate(row):
+            t.rows[r].cells[c].text = v
+    d.add_paragraph('Local law applies when it sets a lower limit.')
+    b = io.BytesIO(); d.save(b)
+    text = extract.extract('coc.docx', b.getvalue()).text
+    assert text.index('table below') < text.index('Tier | Max overtime | Audit') < text.index('Local law applies')       # where it is in the document, not at the end
+    assert 'Row 1: Tier: Tier 1; Max overtime: 12; Audit: Every 12 months' in text
+    assert 'Row 2: Tier: Tier 2; Audit: Every 24 months' in text                     # the empty cell does not shift the audit into the overtime column
+    d = Document(); t = d.add_table(rows=2, cols=3)
+    t.rows[0].cells[0].merge(t.rows[0].cells[1]).text = 'Period'; t.rows[0].cells[2].text = 'Hours'
+    t.rows[1].cells[0].text = 'Q1'; t.rows[1].cells[1].text = 'Jan-Mar'; t.rows[1].cells[2].text = '480'
+    b = io.BytesIO(); d.save(b)
+    text = extract.extract('m.docx', b.getvalue()).text
+    assert 'Period | Hours' in text and 'Row 1: Period: Q1, Jan-Mar; Hours: 480' in text      # a merged header is read once and names both its columns
+
+
+def test_powerpoint_tables_keep_their_columns():
+    from pptx import Presentation
+    from pptx.util import Inches
+    p = Presentation(); s = p.slides.add_slide(p.slide_layouts[5]); s.shapes.title.text = 'Targets'
+    tb = s.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(6), Inches(1)).table
+    tb.cell(0, 0).text, tb.cell(0, 1).text, tb.cell(1, 0).text, tb.cell(1, 1).text = 'Region', 'Target', 'North', '1.2M'
+    b = io.BytesIO(); p.save(b)
+    assert 'Row 1: Region: North; Target: 1.2M' in extract.extract('t.pptx', b.getvalue()).text
+
+
+def test_table_lines_handle_layout_tables_and_missing_headers():
+    assert extract.table_lines([['Signed', 'Dated']]) == ['Signed | Dated']                # one row: plain line
+    assert extract.table_lines([['a'], ['b']]) == ['a', 'b']                             # one column: plain lines
+    assert extract.table_lines([['', 'Hours'], ['Ann', '7']]) == ['Hours', 'Row 1: Column 1: Ann; Hours: 7']
+    assert extract.table_lines([['', ''], [' ', '']]) == []
+
+
+def test_local_ocr_pages_are_marked_and_unsure_pages_are_left_out():
+    def fake(png, mime):
+        fake.n += 1
+        return extract.OcrText('Clearly read words', 'local OCR', 91.0) if fake.n == 1 else extract.OcrText('M4x 43 h0urs', 'local OCR', 41.0, rejected=True)
+    fake.n = 0
+    r = extract.extract('s.pdf', make_pdf(['Typed page here', None, None]), ocr=fake)
+    assert not any('gave no text' in n for n in r.notes)
+    assert 'Page 2 (local OCR)\nClearly read words' in r.text and '43' not in r.text           # the unsure page is not a source
+    assert r.ocr_pages == 1 and r.local_ocr_pages == 1
+    assert any('read with local OCR' in n for n in r.notes) and any('left out' in n and '3: 41%' in n for n in r.notes)
+    assert chunking.MARKER.match('Page 2 (local OCR)')
+    r = extract.extract('b.pdf', make_pdf(['Typed page here', None]), ocr=lambda png, mime: extract.OcrText('', 'local OCR'))
+    assert any('1 scanned page(s) gave no text when read (2)' in n for n in r.notes)                                  # passages still carry their page
+    from PIL import Image
+    b = io.BytesIO(); Image.new('RGB', (20, 20), 'white').save(b, 'PNG')
+    with pytest.raises(extract.ExtractError, match='too little confidence'):
+        extract.extract('i.png', b.getvalue(), ocr=lambda png, mime: extract.OcrText('blurry', 'local OCR', 30.0, rejected=True))
+    r = extract.extract('i.png', b.getvalue(), ocr=lambda png, mime: extract.OcrText('A sign', 'local OCR', 88.0))
+    assert r.text == 'A sign' and r.local_ocr_pages == 1
+
+
+def test_tesseract_output_is_read_with_its_confidence(monkeypatch):
+    head = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'
+    rows = [(1, 1, 1, 1, '96.5', 'Records'), (1, 1, 1, 2, '93.0', 'kept'), (1, 1, 2, 1, '40.0', 'five'), (1, 1, 2, 2, '-1', ''), (2, 1, 1, 1, '90.0', 'years')]
+    tsv = head + ''.join(f'5\t1\t{b}\t{p}\t{l}\t{w}\t0\t0\t1\t1\t{c}\t{t}\n' for b, p, l, w, c, t in rows)
+    text, conf = localocr.parse_tsv(tsv)
+    assert text == 'Records kept\nfive\n\nyears' and round(conf, 1) == round((96.5 * 7 + 93 * 4 + 40 * 4 + 90 * 5) / 20, 1)
+    assert localocr.parse_tsv(head) == ('', None)
+    monkeypatch.setattr(localocr, 'installed_languages', lambda: {'eng', 'ita'})
+    assert localocr.languages('ita, xyz;eng') == 'ita+eng' and localocr.languages('') == 'eng' and localocr.languages('ara') == 'eng'
+    with pytest.raises(RuntimeError, match='only PNG'):
+        localocr.read(b'GIF89a...')
+
+
+@pytest.mark.skipif(not localocr.available(), reason='Tesseract is not installed here (it is in the image)')
+def test_tesseract_reads_a_clear_page_and_doubts_noise():
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new('RGB', (1400, 300), 'white'); dr = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype('DejaVuSans.ttf', 44)
+    except OSError:
+        font = ImageFont.load_default(size=44)
+    dr.text((40, 60), 'Overtime must not exceed 12 hours per week.', fill='black', font=font)
+    b = io.BytesIO(); img.save(b, 'PNG')
+    r = localocr.read(b.getvalue())
+    assert '12 hours' in r.text and r.label == 'local OCR' and r.confidence > 80 and not r.rejected
+    import random
+    rnd = random.Random(1); noise = Image.new('L', (600, 300))
+    noise.putdata([rnd.choice((0, 255)) for _ in range(600 * 300)])
+    b = io.BytesIO(); noise.convert('RGB').save(b, 'PNG')
+    r = localocr.read(b.getvalue())
+    assert not r.text or r.rejected
+
+
+def test_scans_are_read_locally_without_an_ai_model_and_the_source_says_so(client, world, monkeypatch):
+    from studio import llm
+    monkeypatch.setattr(llm, 'available', lambda: False)
+    monkeypatch.setattr(localocr, 'available', lambda: True)
+    monkeypatch.setattr(localocr, 'read', lambda png, langs, conf: extract.OcrText('Scanned policy text about refunds', 'local OCR', 90.0))
+    a = world['a']['id']
+    _as(client, 'ann'); _upload(client, a, 'scan.pdf', make_pdf([None]))
+    _run()
+    src = client.get(f'/api/library/collections/{a}/sources').json()['sources'][0]
+    assert src['status'] == 'ready' and src['stats']['ocr_pages'] == 1 and src['stats']['local_ocr_pages'] == 1
+    assert any('local OCR' in n for n in src['stats']['notes'])
+    from studio import settings
+    settings.put('OCR_LOCAL', False, 't')
+    try:
+        _upload(client, a, 'scan2.pdf', make_pdf([None, None])); _run()      # another file: the same bytes would be refused as a duplicate
+        src = [s for s in client.get(f'/api/library/collections/{a}/sources').json()['sources'] if s['name'] == 'scan2.pdf'][0]
+        assert src['status'] == 'failed'                                                 # turned off: skipped as before
+    finally:
+        settings.reset('OCR_LOCAL', 't')
+
+
+def test_a_failing_ai_model_falls_back_to_local_ocr_page_by_page(client, world, monkeypatch):
+    from studio import llm
+    monkeypatch.setattr(llm, 'available', lambda: True)
+    def broken(png, mime):
+        raise TimeoutError('the model did not answer')
+    monkeypatch.setattr(llm, 'ocr', broken)
+    monkeypatch.setattr(localocr, 'available', lambda: True)
+    monkeypatch.setattr(localocr, 'read', lambda png, langs, conf: extract.OcrText('Read on the server instead', 'local OCR', 88.0))
+    monkeypatch.setattr('studio.library.wiki.run', lambda *a, **k: 'skipped')         # no source page is written in this test
+    from studio import embeddings
+    monkeypatch.setattr(embeddings, 'available', lambda: False)
+    a = world['a']['id']
+    _as(client, 'ann'); _upload(client, a, 'fallback.pdf', make_pdf([None]))
+    _run()
+    src = client.get(f'/api/library/collections/{a}/sources').json()['sources'][0]
+    assert src['status'] == 'ready' and src['stats']['local_ocr_pages'] == 1
+    assert any('read with local OCR instead' in n for n in src['stats']['notes'])
+
+
 # ------------------------------------------------------------------ chunking
 def test_passages_fit_the_embedding_model_and_carry_their_place(monkeypatch):
     monkeypatch.setattr(config, 'EMBEDDING_MAX_TOKENS', 128)
@@ -163,7 +295,8 @@ def test_keywords_work_without_an_embedding_model(client, world):
     assert client.get(f'/api/library/collections/{a}/search', params={'q': 'invoices month'}).json()['passages'][0]['source'] == 'k.txt'
 
 
-def test_an_unreadable_file_fails_once_with_a_plain_reason(client, world):
+def test_an_unreadable_file_fails_once_with_a_plain_reason(client, world, monkeypatch):
+    monkeypatch.setattr(localocr, 'available', lambda: False)           # whether or not Tesseract is installed where the suite runs
     a = world['a']['id']
     _as(client, 'ann'); _upload(client, a, 'blank.pdf', make_pdf([None]))
     _run()

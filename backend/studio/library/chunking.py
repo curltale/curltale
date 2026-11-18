@@ -4,7 +4,7 @@ import re
 from .. import config
 
 CHARS_PER_TOKEN = 3.5                       # a cautious estimate for mixed text; figures, codes and other scripts use more tokens than plain English
-MARKER = re.compile(r'^(Page \d+(?: \(OCR\))?|Slide \d+|Sheet: .+)$')
+MARKER = re.compile(r'^(Page \d+(?: \((?:local )?OCR\))?|Slide \d+|Sheet: .+)$')
 
 
 def tokens(text):

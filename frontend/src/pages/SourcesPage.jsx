@@ -41,7 +41,7 @@ function Row({ s, cid, canWrite, onChange }) {
         <div role="progressbar" aria-label="Progress" aria-valuenow={s.job?.pct || 0} aria-valuemin="0" aria-valuemax="100" style={{ height: 6, borderRadius: 3, background: 'var(--line)', overflow: 'hidden', marginTop: 6 }}>
           <i style={{ display: 'block', height: '100%', width: `${s.job?.pct || 4}%`, background: 'var(--accent)', transition: 'width .3s' }} /></div></>}
       {s.status === 'ready' && s.stats?.passages > 0 && <div className="small muted" style={{ marginTop: 2 }}>
-        {s.title && s.title !== s.name ? `${s.title} · ` : ''}{s.stats.pages ? `${s.stats.pages} page${s.stats.pages === 1 ? '' : 's'} · ` : ''}{s.stats.passages} passages{s.stats.ocr_pages ? ` · ${s.stats.ocr_pages} read by OCR` : ''}{s.stats.embedded < s.stats.passages ? ' · keyword search only' : ''}
+        {s.title && s.title !== s.name ? `${s.title} · ` : ''}{s.stats.pages ? `${s.stats.pages} page${s.stats.pages === 1 ? '' : 's'} · ` : ''}{s.stats.passages} passages{s.stats.ocr_pages ? ` · ${s.stats.ocr_pages} read by OCR${s.stats.local_ocr_pages ? ` (${s.stats.local_ocr_pages === s.stats.ocr_pages ? 'all' : s.stats.local_ocr_pages} locally, check figures)` : ''}` : ''}{s.stats.embedded < s.stats.passages ? ' · keyword search only' : ''}
         {' '}<button className="btn small" onClick={() => setOpen(!open)}>{open ? 'Hide passages' : 'Show passages'}</button>
         {s.wiki_status !== 'skipped' && s.wiki_status !== 'none' && <Link className="btn small" style={{ marginLeft: 6 }} to={`/library/sources/${s.id}?c=${cid}`}>Read the page</Link>}</div>}
       {(s.stats?.notes || []).map((n, i) => <div key={i} className="small" style={{ color: 'var(--warn)', marginTop: 2 }}>{n}</div>)}

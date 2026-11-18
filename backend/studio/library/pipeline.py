@@ -3,7 +3,7 @@ The wiki steps (writing, verifying, finding topics) are added after this one. Ea
 import hashlib
 from .. import config, embeddings, llm, settings, vectors
 from ..db import conn, J
-from . import bridge, chunking, extract, fetch, interview, jobs, scope as S, storage, topics, wiki
+from . import bridge, chunking, extract, fetch, interview, jobs, localocr, scope as S, storage, topics, wiki
 
 BATCH = 16
 MAX_FILE_BYTES = 500 * 1024 * 1024
@@ -50,19 +50,33 @@ def ingest(job, ctx):
             raise RuntimeError('the stored file does not match what was uploaded')
 
         ctx.progress('extracting the text', 15)
-        ocr_errors = []
+        ocr_errors, local_errors = [], []
         allow_ai = S.trusted(col).allow_ai
+        use_ai = llm.available() and allow_ai
+        use_local = bool(settings.get('OCR_LOCAL')) and localocr.available()      # runs on this server: allowed even where AI is not
+
+        def read_local(png):
+            try:
+                return localocr.read(png, settings.get('OCR_LOCAL_LANGUAGES'), settings.get('OCR_LOCAL_MIN_CONFIDENCE'))
+            except Exception as e:
+                local_errors.append(str(e)[:120])
+                return ''
 
         def ocr(png, mime):
-            try:
-                return llm.ocr(png, mime)
-            except Exception as e:                                       # one unreadable page must not lose the others
-                ocr_errors.append(f'{type(e).__name__}: {str(e)[:120]}')
-                return ''
+            if use_ai:
+                try:
+                    return llm.ocr(png, mime)
+                except Exception as e:                                   # one unreadable page must not lose the others
+                    ocr_errors.append(f'{type(e).__name__}: {str(e)[:120]}')
+                    if not use_local:
+                        return ''
+            return read_local(png)                                       # no AI model for this page: Tesseract, with its confidence checked
         fname = src['storage_key'].rsplit('/', 1)[-1]                    # the stored file's own name decides how it is read (a web page is stored as page.html)
-        res = extract.extract(fname, data, ocr if (llm.available() and allow_ai) else None, settings.get('OCR_MAX_PAGES'))
+        res = extract.extract(fname, data, ocr if (use_ai or use_local) else None, settings.get('OCR_MAX_PAGES'))
         if ocr_errors:
-            res.notes.append(f'OCR failed on {len(ocr_errors)} page(s): {ocr_errors[0]}')
+            res.notes.append(f'the OCR model failed on {len(ocr_errors)} page(s){", read with local OCR instead" if use_local else ""}: {ocr_errors[0]}')
+        if local_errors:
+            res.notes.append(f'local OCR failed on {len(local_errors)} page(s): {local_errors[0]}')
 
         ctx.progress('splitting into passages', 40)
         parts = chunking.chunk(res.text)
@@ -96,7 +110,7 @@ def ingest(job, ctx):
             except Exception as e:                                          # the passages are fine and searchable: only the page failed, and can be regenerated
                 wiki_status = 'failed'
                 res.notes.append(f'the source page could not be written: {type(e).__name__}: {str(e)[:200]}')
-        stats = {'chars': len(res.text), 'passages': len(parts), 'embedded': embedded, 'pages': res.pages, 'ocr_pages': res.ocr_pages, 'notes': res.notes}
+        stats = {'chars': len(res.text), 'passages': len(parts), 'embedded': embedded, 'pages': res.pages, 'ocr_pages': res.ocr_pages, 'local_ocr_pages': res.local_ocr_pages, 'notes': res.notes}
         with conn() as c:
             c.execute("UPDATE library.source SET status='ready', error=NULL, title=%s, stats=%s, wiki_status=%s WHERE id=%s", (res.title, J(stats), wiki_status, sid))
         ctx.progress('done', 100)

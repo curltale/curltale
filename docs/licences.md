@@ -17,6 +17,7 @@ Licences were read from the installed packages' metadata and the pinned lock fil
 | `jmespath`, `python-dateutil`, `six` (boto3's dependencies) | MIT / Apache-2.0 + BSD / MIT | OK |
 | `moto` (tests only, not in the image) | Apache-2.0 | OK |
 | `pypdf` (BSD-3), `pypdfium2` (BSD-3 / Apache-2.0, bundles PDFium), `beautifulsoup4`, `soupsieve` (MIT), `python-docx`, `python-pptx` (MIT), `lxml` (BSD-3), `xlsxwriter` (BSD-2) | in the image for reading documents | OK. `pypdfium2` is used for PDFs instead of the AGPL `pymupdf` |
+| Tesseract OCR (`tesseract-ocr`, Debian package, called as a program for local OCR) and its English language data (`tesseract-ocr-eng`, trained models) | Apache-2.0 (Tesseract and its tessdata); Leptonica and image libraries: BSD-style / libpng / libtiff / IJG licences | OK; unmodified Debian packages in the image, run as a separate program. Languages added with `OCR_LANGS` are tessdata packages under the same licence |
 | Playwright's bundled Chromium (fetcher sidecar) | BSD-style plus third-party notices | OK; ship as a separate optional image |
 | Image `pgvector/pgvector` (Postgres + pgvector) | PostgreSQL licence | OK |
 | Playwright (Python package and the `mcr.microsoft.com/playwright/python` image used for the optional browser container; Chromium inside) | Apache-2.0; Chromium BSD-3 plus third-party notices; Ubuntu base | OK; separate optional image, nothing in the main image |
