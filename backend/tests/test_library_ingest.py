@@ -33,6 +33,32 @@ def test_text_and_markdown_keep_their_headings_and_odd_encodings_are_read():
     assert 'hello' in extract.extract('a.txt', b'\xff\xfe' + 'hello'.encode('utf-16-le')).text
 
 
+def test_web_tables_keep_their_columns_and_heading_anchors_are_dropped():
+    html = (b'<html><body><main><h2 id="p">Pricing <a class="anchor" href="#p">#</a></h2><h3>Limits <a href="#l" aria-hidden="true">\xc2\xb6</a></h3>'
+            b'<table><caption>Plans</caption><thead><tr><th>Plan</th><th colspan="2">Price</th></tr></thead><tbody><tr><td>Basic</td><td>10</td><td>month</td></tr>'
+            b'<tr><td>Plus</td><td></td><td>year</td></tr></tbody></table>'
+            b'<table role="presentation"><tr><td>Left column text</td><td>Right column text</td></tr></table>'
+            b'<table><tr><td><table><tr><th>Inner</th><th>Value</th></tr><tr><td>a</td><td>1</td></tr></table></td><td><p>One paragraph.</p><p>Another.</p></td></tr></table>'
+            b'<p>See <a href="/x">the guide</a>.</p></main></body></html>')
+    t = extract.extract('p.html', html).text
+    assert t.startswith('## Pricing\n\n### Limits\n\n')                                                            # no #, no pilcrow after them
+    assert 'Plans\nPlan | Price\nRow 1: Plan: Basic; Price: 10, month\nRow 2: Plan: Plus; Price: year' in t       # merged header names both columns; empty cell skipped
+    assert 'Left column text' in t and 'Row 1: Left' not in t                                                      # a layout table stays text
+    assert 'Row 1: Inner: a; Value: 1' in t and 'One paragraph.' in t                                              # the outer one is layout, the inner one data
+    assert t.endswith('See the guide.')                                                                            # a link keeps its words, not its address
+
+
+def test_web_pages_keep_lists_code_and_emphasis_as_markdown():
+    html = (b'<html><body><main><p>Run <b>both</b> steps, see <a href="https://example.com/guide">the guide</a>:</p><ol><li>Copy the file</li><li>Start it'
+            b'<ul><li>with <code>-d</code></li></ul></li></ol><pre><code>cp a.yml b.yml   # keep this spacing\n    docker compose up -d\n\n\nend</code></pre>'
+            b'<p>snake_case and 2*3 stay as written.</p></main></body></html>')
+    t = extract.extract('p.html', html).text
+    assert 'Run **both** steps, see the guide:' in t and 'example.com' not in t
+    assert '1. Copy the file\n2. Start it\n   - with `-d`' in t                                                 # nested under its item
+    assert '```\ncp a.yml b.yml   # keep this spacing\n    docker compose up -d\n\n\nend\n```' in t           # code keeps its spaces and blank lines
+    assert 'snake_case and 2*3 stay as written.' in t                                                            # nothing escaped
+
+
 def test_html_drops_page_chrome_and_turns_headings_into_markdown():
     html = b'<html><head><title>Guide</title></head><body><nav>MENU</nav><div class="cookie-banner">COOKIES</div><main><h1>Plans</h1><p>Premium has seats.</p><h2>Billing</h2><p>Yearly.</p></main><footer>FOOT</footer><script>x=1</script></body></html>'
     r = extract.extract('p.html', html)

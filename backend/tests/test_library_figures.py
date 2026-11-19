@@ -265,7 +265,7 @@ def test_empty_pictures_never_reach_the_model_and_white_icons_are_shown_on_dark(
     grad = Image.linear_gradient('L').resize((1600, 300)).convert('RGB')                                # a banner background
     flat = Image.new('RGB', (700, 700), 'white')
     shot = base64.b64encode(png(screenshot())).decode()
-    html = ('<html><body><main><p>Plans from AED 15.</p>' + ''.join(f'<img src="data:image/png;base64,{base64.b64encode(png(i)).decode()}">' for i in (grad, flat)) +
+    html = ('<html><body><main><p>Plans from 15 a month.</p>' + ''.join(f'<img src="data:image/png;base64,{base64.b64encode(png(i)).decode()}">' for i in (grad, flat)) +
             f'<img src="data:image/png;base64,{shot}"><p>Daily pass.</p></main></body></html>').encode()
     d = Describer()
     r = extract.extract('p.html', html, figures=figures.Options(describe=d))
@@ -311,13 +311,13 @@ def test_the_model_can_say_a_figure_is_decorative_and_a_repeated_screenshot_is_d
 
 
 def test_a_description_quoting_labels_the_picture_does_not_show_is_left_out():
-    invented = 'A plan card: "Daily Combo Plan", "AED 60 /Month", "Validity: 1 Day", "Dial *177#" and "3GB".'
+    invented = 'A plan card: "Team Plan", "60 per month", "Valid for one year", "Seats: 25" and "Priority support".'
     assert not figures.grounded(invented, b'png', lambda img: '')                                     # nothing readable in the picture
-    assert figures.grounded(invented, b'png', lambda img: 'Daily Combo Plan AED 60 Month Validity 1 Day')
+    assert figures.grounded(invented, b'png', lambda img: 'Team Plan 60 per month Valid for one year')
     assert figures.grounded('A red phone icon.', b'png', lambda img: '')                               # quotes nothing: not judged
     d = Describer(invented)
     r = extract.extract('m.docx', manual_docx(), figures=figures.Options(describe=d, ground=lambda img: 'Field 1 Field 2 Save'))
-    assert r.figure_stats['ungrounded'] == 2 and 'Daily Combo' not in r.text and any('does not show' in n for n in r.notes)
+    assert r.figure_stats['ungrounded'] == 2 and 'Team Plan' not in r.text and any('does not show' in n for n in r.notes)
 
 
 def test_a_failing_model_leaves_the_caption_and_says_so():

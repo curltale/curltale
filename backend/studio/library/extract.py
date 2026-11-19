@@ -124,6 +124,108 @@ _NOISE_ROLES = {'navigation', 'banner', 'contentinfo', 'complementary', 'search'
 _NOISE_CLASS = re.compile(r'\b(footer|header|topnav|top-nav|navbar|nav-bar|navigation|breadcrumb|cookie|gdpr|consent|copyright|sidebar|side-bar|widget|advertisement|promo|banner|skip-link)\b', re.I)
 
 
+_ANCHOR_CLASS = re.compile(r'\b(anchor|headerlink|header-anchor|heading-anchor|heading-link|permalink|hash-link|anchorjs-link)\b', re.I)
+_BLOCKS = ['p', 'ul', 'ol', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'table', 'div', 'section']
+
+
+def _drop_anchors(root):
+    """The little links sites put next to headings (#, ¶, §, a link icon) are not text: "## Pricing #" would be quoted that way."""
+    for a in root.find_all('a'):
+        if a.attrs is None:
+            continue
+        t = a.get_text(strip=True)
+        if t in ('#', '\u00b6', '\u00a7', '\U0001f517') or (len(t) <= 2 and (_ANCHOR_CLASS.search(' '.join(a.get('class') or [])) or a.get('aria-hidden') == 'true')):
+            a.decompose()
+
+
+def _layout_table(table):
+    """A table that only arranges the page (other tables or several paragraphs inside, long cells, or marked so): read as text, not as rows."""
+    if table.get('role') in ('presentation', 'none') or table.find('table') is not None:
+        return True
+    for cell in table.find_all(['td', 'th']):
+        if len(cell.get_text(' ', strip=True)) > 400 or len(cell.find_all(_BLOCKS)) > 1:
+            return True
+    return False
+
+
+def _html_tables(root, token):
+    """A data table reads like a Word table: each value keeps its column name ("Row 2: Plan: Plus; Price: 12"). A cell merged across columns names
+    each column it spans in the header and is not repeated in a row, as in Word. Each data table is replaced by a marker (its lines come back after
+    the page is turned into Markdown, which would otherwise write a pipe table); a layout table is unwrapped into plain blocks of text.
+    -> {marker: lines}"""
+    out = {}
+    layout = [t for t in root.find_all('table') if _layout_table(t)]
+    data = [t for t in root.find_all('table') if t not in layout]
+    for table in reversed(data):                                                         # inner ones first (a data table holds no other table)
+        if table.parent is None:
+            continue
+        rows = []
+        for tr in table.find_all('tr'):
+            cells = []
+            for cell in tr.find_all(['th', 'td'], recursive=False):
+                try:
+                    span = max(1, min(int(cell.get('colspan') or 1), 50))
+                except ValueError:
+                    span = 1
+                cells += [cell.get_text(' ', strip=True)] + [None] * (span - 1)
+            if cells:
+                rows.append(cells)
+        cap = table.find('caption')
+        lines = ([cap.get_text(' ', strip=True)] if cap and cap.get_text(strip=True) else []) + table_lines(rows)
+        mark = f'\u27e6tbl:{token}:{len(out)}\u27e7'
+        out[mark] = '\n'.join(lines)
+        table.replace_with(_block(root, mark))
+    for table in layout:
+        for el in [table] + table.find_all(['thead', 'tbody', 'tfoot', 'tr', 'caption']):
+            el.name = 'div'
+        for el in table.find_all(['td', 'th']):
+            el.name = 'span'
+            el.append(' ')
+    return out
+
+
+def _block(root, text):
+    """A paragraph holding only `text`: markers must stand on their own line, not run into the sentence around them."""
+    from bs4 import BeautifulSoup
+    p = BeautifulSoup('', 'html.parser').new_tag('p')
+    p.string = text
+    return p
+
+
+def _markdown():
+    from markdownify import MarkdownConverter
+
+    class Page(MarkdownConverter):
+        """A page as Markdown for reading: headings, lists, code blocks and emphasis kept; a link keeps its words, not its address (an address in a
+        quoted fact is noise); pictures are figures, read apart."""
+        def convert_a(self, el, text, parent_tags):
+            return text
+
+        def convert_img(self, el, text, parent_tags):
+            return ''
+    return Page(heading_style='ATX', bullets='-', escape_asterisks=False, escape_underscores=False, escape_misc=False)
+
+
+_CODE = re.compile(r'```[^\n]*\n.*?\n```', re.S)
+
+
+def _normalize_markdown(text):
+    """normalize(), except inside code blocks, whose spaces and blank lines mean something."""
+    keep = {}
+
+    def hold(m):
+        k = f'\u27e6code:{len(keep)}\u27e7'
+        keep[k] = m.group(0)
+        return k
+    text = _CODE.sub(hold, text)
+    text = re.sub(r'(?m)^( +)(?=[-*+] |\d+[.)] )', lambda m: '\u27e6ind:' + str(len(m.group(1))) + '\u27e7', text)   # a nested list item keeps its indent
+    text = normalize(text)
+    text = re.sub('\u27e6ind:(\\d+)\u27e7', lambda m: ' ' * int(m.group(1)), text)
+    for k, v in keep.items():
+        text = text.replace(k, v)
+    return text
+
+
 def html_to_text(raw, col=None, base_url=None):
     """col: a figures.Collector to gather the main content's pictures and inline SVG drawings (base_url resolves the pictures of a captured page)."""
     from bs4 import BeautifulSoup
@@ -141,12 +243,17 @@ def html_to_text(raw, col=None, base_url=None):
         figures.html_figures(root, col, base_url, css)
         for n in soup('svg'):                                                         # what is left (outside the main content) is not read
             n.decompose()
-    for tag in root.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):                 # headings become Markdown headings: they steer chunking and citations
-        tag.insert_before('\n\n' + '#' * int(tag.name[1]) + ' ')
-        tag.append('\n\n')
-    for tag in root.find_all(['p', 'li', 'tr', 'section', 'article', 'div', 'br']):
-        tag.append('\n')
-    return normalize(root.get_text(' ', strip=False)), title
+    _drop_anchors(root)
+    import secrets
+    token = secrets.token_hex(4)
+    tables = _html_tables(root, token)
+    for t in list(root.find_all(string=re.compile('\u27e6fig:'))):                   # a figure's marker stands on its own line, like its block will
+        if t.parent is not None and t.parent.name != 'p' or (t.parent is not None and t.parent.get_text(strip=True) != t.strip()):
+            t.replace_with(_block(root, t.strip()))
+    md = _markdown().convert_soup(root)                                                 # headings, lists, code and emphasis as Markdown: they steer chunking and citations
+    for mark, lines in tables.items():
+        md = md.replace(mark, '\n\n' + lines + '\n\n')
+    return _normalize_markdown(md), title
 
 
 def csv_to_text(content, delimiter=','):

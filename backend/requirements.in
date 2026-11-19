@@ -15,6 +15,7 @@ boto3>=1.35               # S3 storage for the Library (optional at run time)
 pypdf>=5                 # Library: reading documents
 pypdfium2>=4              # Library: rendering PDF pages for OCR (Apache-2.0 / BSD-3, replaces the AGPL PyMuPDF)
 beautifulsoup4>=4.12
+markdownify>=1.2           # Library: web pages read as Markdown (lists, code, emphasis); MIT, on top of beautifulsoup4
 python-docx>=1.1
 python-pptx>=1.0
 resvg-py>=0.5               # Library: drawing SVG figures (MIT, wraps resvg; no system libraries)

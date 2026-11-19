@@ -2,6 +2,14 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [0.4.1] - 2026-11-19
+
+### Changed
+- **Web pages are read as Markdown.** A captured web page or an uploaded HTML file keeps its structure: headings, bulleted and numbered lists (nested ones indented), code blocks with their spacing, bold, italics and quotes. A link keeps its words, not its address, and nothing is escaped (*snake_case* stays as written). New dependency `markdownify` (MIT).
+- **Web page tables keep their columns.** A data table now reads like a Word or PowerPoint table: each row lists its values next to their column names (*Row 2: Plan: Plus; Price: 12; Billing: monthly*), so a row still reads correctly when it is quoted or cut from its header. A cell merged across columns names each of them in the header, empty cells move nothing, and a caption comes first. Tables that only arrange the page (marked as presentation, holding other tables, or with several paragraphs in a cell) stay plain text.
+- **Heading anchors are dropped.** The small `#`, `¶` or `§` links many sites put next to headings no longer end up in the text.
+- Pages already in a collection keep their text until they are read again.
+
 ## [0.4.0] - 2026-11-19
 
 ### Added
