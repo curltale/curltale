@@ -293,10 +293,10 @@ def _everything(x):
 def test_a_credential_without_sources_gets_the_content_and_no_citation_apparatus(client, library):
     """The switch is per credential: the same tools, the same pages, without markers, source lists, links into the app and collection ids."""
     quiet, normal, col = library['toks']['quiet'], library['toks']['a'], f'Alpha {MARK_A}'
-    # the tool list: one tool goes (documents behind a topic), the descriptions stop talking about sources
+    # the tool list: two tools go (documents behind a topic, a figure's image), the descriptions stop talking about sources
     tools_q = {x['name']: x for x in _rpc(client, quiet, 'tools/list')['tools']}
     tools_n = {x['name']: x for x in _rpc(client, normal, 'tools/list')['tools']}
-    assert set(tools_n) - set(tools_q) == {'library_topic_sources'}
+    assert set(tools_n) - set(tools_q) == {'library_topic_sources', 'library_figure'}
     from studio import mcp_server
     for name, old, _new in mcp_server.WITHOUT_SOURCES:                                   # every replacement still finds its text: a reworded description must fail here, not silently keep the old words
         assert old in ' '.join(tools_n[name]['description'].split()), (name, old)

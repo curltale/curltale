@@ -3,11 +3,13 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api.js'
 import SafeMarkdown from '../components/SafeMarkdown.jsx'
 import { Pill } from '../components/ui.jsx'
+import { rememberCollection } from '../components/collection.js'
 
 export default function InterviewPage() {
   const { iid } = useParams()
   const [params] = useSearchParams()
   const cid = params.get('c'), base = `/api/library/collections/${cid}/interviews/${iid}`
+  useEffect(() => { rememberCollection(cid) }, [cid])
   const [d, setD] = useState(null), [err, setErr] = useState(''), [text, setText] = useState(''), [live, setLive] = useState(null), [sending, setSending] = useState(false)
   const [editClaim, setEditClaim] = useState(null), [editDraft, setEditDraft] = useState(null), [busy, setBusy] = useState(false)
   const end = useRef()

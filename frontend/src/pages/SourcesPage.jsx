@@ -4,6 +4,7 @@ import { api } from '../api.js'
 import { Modal, Pill } from '../components/ui.jsx'
 import { UsagePill } from './CollectionsPage.jsx'
 import { WIKI } from './SourcePage.jsx'
+import { useStudio } from '../context.jsx'
 
 const STATUS = { queued: ['Waiting', ''], processing: ['Working', 'accent'], ready: ['Ready', 'ok'], failed: ['Failed', 'bad'] }
 const size = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'
@@ -41,7 +42,7 @@ function Row({ s, cid, canWrite, onChange }) {
         <div role="progressbar" aria-label="Progress" aria-valuenow={s.job?.pct || 0} aria-valuemin="0" aria-valuemax="100" style={{ height: 6, borderRadius: 3, background: 'var(--line)', overflow: 'hidden', marginTop: 6 }}>
           <i style={{ display: 'block', height: '100%', width: `${s.job?.pct || 4}%`, background: 'var(--accent)', transition: 'width .3s' }} /></div></>}
       {s.status === 'ready' && s.stats?.passages > 0 && <div className="small muted" style={{ marginTop: 2 }}>
-        {s.title && s.title !== s.name ? `${s.title} · ` : ''}{s.stats.pages ? `${s.stats.pages} page${s.stats.pages === 1 ? '' : 's'} · ` : ''}{s.stats.passages} passages{s.stats.ocr_pages ? ` · ${s.stats.ocr_pages} read by OCR${s.stats.local_ocr_pages ? ` (${s.stats.local_ocr_pages === s.stats.ocr_pages ? 'all' : s.stats.local_ocr_pages} locally, check figures)` : ''}` : ''}{s.stats.embedded < s.stats.passages ? ' · keyword search only' : ''}
+        {s.title && s.title !== s.name ? `${s.title} · ` : ''}{s.stats.pages ? `${s.stats.pages} page${s.stats.pages === 1 ? '' : 's'} · ` : ''}{s.stats.passages} passages{s.stats.ocr_pages ? ` · ${s.stats.ocr_pages} read by OCR${s.stats.local_ocr_pages ? ` (${s.stats.local_ocr_pages === s.stats.ocr_pages ? 'all' : s.stats.local_ocr_pages} locally, check figures)` : ''}` : ''}{s.stats.figures?.kept ? ` · ${s.stats.figures.kept} figure${s.stats.figures.kept === 1 ? '' : 's'}` : ''}{s.stats.embedded < s.stats.passages ? ' · keyword search only' : ''}
         {' '}<button className="btn small" onClick={() => setOpen(!open)}>{open ? 'Hide passages' : 'Show passages'}</button>
         {s.wiki_status !== 'skipped' && s.wiki_status !== 'none' && <Link className="btn small" style={{ marginLeft: 6 }} to={`/library/sources/${s.id}?c=${cid}`}>Read the page</Link>}</div>}
       {(s.stats?.notes || []).map((n, i) => <div key={i} className="small" style={{ color: 'var(--warn)', marginTop: 2 }}>{n}</div>)}
@@ -76,10 +77,11 @@ function Search({ cid, usage }) {
 
 export default function SourcesPage() {
   const [params, setParams] = useSearchParams()
-  const [cols, setCols] = useState(null), [data, setData] = useState(null), [err, setErr] = useState(''), [over, setOver] = useState(false), [sending, setSending] = useState(0)
+  const [data, setData] = useState(null), [err, setErr] = useState(''), [over, setOver] = useState(false), [sending, setSending] = useState(0)
   const input = useRef(), [adding, setAdding] = useState(false), [url, setUrl] = useState('')
   const cid = params.get('c')
-  useEffect(() => { api.get('/api/library/collections').then((d) => { const mine = d.collections.filter((c) => c.level); setCols(mine); if (!cid && mine[0]) setParams({ c: mine[0].id }, { replace: true }) }).catch((e) => setErr(e.message)) }, [])
+  const { collections } = useStudio()                       // the shell's bar chooses the collection; this page reads it
+  const cols = collections ? collections.filter((c) => c.level) : null
   const load = () => cid && api.get(`/api/library/collections/${cid}/sources`).then((d) => { setData(d); setErr('') }).catch((e) => setErr(e.message))
   useEffect(() => { setData(null); load() }, [cid])
   const active = data?.sources.some((s) => s.status === 'queued' || s.status === 'processing' || (s.job?.kind === 'source.topics' && (s.job.status === 'queued' || s.job.status === 'running')))
@@ -106,9 +108,7 @@ export default function SourcesPage() {
       <div className="row" style={{ marginBottom: 14 }}>
         <div><h1>Sources</h1><div className="muted">The original files of a collection. Each is checked, then processed in the background.</div></div>
  {canWrite && <button className="btn right" onClick={() => setAdding(true)}>Add a web page</button>}
-        {cols?.length > 0 && <select style={{ width: 'auto' }} value={cid || ''} onChange={(e) => setParams({ c: e.target.value })}>{cols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
       </div>
-      {cols && !cols.length && <p className="muted">You have no access to any collection yet.</p>}
       {err && <div className="banner bad">{err}</div>}
       {data && <p className="small muted" style={{ marginTop: 0 }}>Collection <b>{data.collection.name}</b> <UsagePill usage={data.collection.usage} /> · your access: {data.collection.level}</p>}
       {canWrite && (

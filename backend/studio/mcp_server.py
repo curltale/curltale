@@ -7,7 +7,7 @@ import copy
 import inspect
 import time
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import Context, FastMCP, Image
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
@@ -26,7 +26,8 @@ Ontology and data: `get_access` (what may I see) - `search` (find by words or co
 Documents (only if your credential has collections): `library_context` (PRIMARY: whole topic pages for a question) - `library_search` (which topics
 exist) - `library_topic` (one page) - `library_topic_claims` (facts with exact quotes) - `library_topic_sources` (documents behind a topic) -
 `library_traverse` (related topics) - `library_source_search` / `library_source` (the verified page of each document, for detail) -
-`library_vocabulary` - `library_collections`. A credential without "sources" gets pages with no citation markers or links, and no `library_topic_sources`: do not ask for them.
+`library_figure` (a document's screenshot, diagram or chart, with its image) - `library_vocabulary` - `library_collections`. A credential without "sources"
+gets pages with no citation markers or links, and no `library_topic_sources` or `library_figure`: do not ask for them.
 
 ## Start
 Call `get_access` once. Whatever it does not grant is absent from every answer: say it is withheld, never treat it as empty or zero.
@@ -120,7 +121,10 @@ def _with_caller(fn, public_name=None):
         except Exception as e:
             tools.log_call(public_name or fn.__name__, shown, {'error': f'{type(e).__name__}: {e}'}, (time.perf_counter() - t0) * 1000)
             raise
+        image = result.pop('_image', None) if isinstance(result, dict) else None
         tools.log_call(public_name or fn.__name__, shown, result, (time.perf_counter() - t0) * 1000)
+        if image:                                                        # a figure: its facts as text, then the picture as an image block
+            return [tools.compact(result), Image(data=image[0], format=image[1])]
         return tools.compact(result)                                     # one compact JSON text: no indentation, no structured duplicate
     wrapper.__name__, wrapper.__doc__, wrapper.__annotations__ = public_name or fn.__name__, fn.__doc__, {**fn.__annotations__, 'ctx': Context, 'return': str}
     wrapper.__signature__ = sig.replace(parameters=[*sig.parameters.values(), inspect.Parameter('ctx', inspect.Parameter.KEYWORD_ONLY, annotation=Context)])
@@ -184,7 +188,7 @@ WITHOUT_SOURCES_PARAMS = [
 def _without_sources(tools_):
     out = []
     for t_ in tools_:
-        if t_.name == 'library_topic_sources':
+        if t_.name in ('library_topic_sources', 'library_figure'):
             continue
         t_.description = ' '.join((t_.description or '').split())                    # one space between words, as the replacements are written
         for name, old, new in WITHOUT_SOURCES:
@@ -219,10 +223,12 @@ mcp._mcp_server.request_handlers[mcp_types.ListToolsRequest] = _filtered_list_to
 # the document tools: the same wrapper, so they run as the bearer token and are logged like the others
 TITLES.update({'library_collections': 'Which document collections can I read?', 'library_context': 'Answer from the documents', 'library_search': 'Find topics', 'library_topic': 'Read a topic',
                'library_topic_claims': 'Claims of a topic, with quotes', 'library_topic_sources': 'Documents behind a topic', 'library_traverse': 'Topics around a topic',
-               'library_source_search': 'Search the source wikis', 'library_source': 'Read a source', 'library_vocabulary': 'Topic and relation types'})
+               'library_source_search': 'Search the source wikis', 'library_source': 'Read a source', 'library_figure': 'A figure of a source, with its image',
+               'library_vocabulary': 'Topic and relation types'})
 for tool_name, fn in library_agent.LIBRARY.items():
     mcp.tool(name=tool_name, title=TITLES[tool_name], annotations=ToolAnnotations(title=TITLES[tool_name], readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False), structured_output=False)(_with_caller(fn, tool_name))
-    tools.BY_NAME[tool_name] = fn                                     # Alfred calls tools by name through tools.call
+    if tool_name != 'library_figure':                                 # an image is for agents that read images: Alfred reads the description in the text
+        tools.BY_NAME[tool_name] = fn                                 # Alfred calls tools by name through tools.call
 
 for _t in mcp._tool_manager.list_tools():                          # every tool, model and document, once all are registered
     _t.parameters = _slim(_t.parameters)

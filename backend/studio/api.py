@@ -173,19 +173,21 @@ def change_password(body: PasswordBody, request: Request, u=Depends(auth.current
 
 # ---------------------------------------------------------------- reading
 def library_review(u):
+    """{collection id: items waiting for review} for this person (the menu shows the count of the collection they are working in)."""
     if not settings.get('LIBRARY_ENABLED'):
-        return 0
+        return {}
     from .library import api as lib_api, scope as lib_scope
     try:
-        return lib_api.review_count(lib_scope.for_user(u))
+        return lib_api.review_counts(lib_scope.for_user(u))
     except Exception:
-        return 0
+        return {}
 
 
 @app.get('/api/status')
 def status(u=Depends(auth.current_user)):
     pub, dr = O.published_id(), O.draft_id()
-    return {'published': pub, 'draft': dr, 'four_eyes': versions.four_eyes(), 'draft_editors': versions.editors(dr) if dr else [], 'embeddings_configured': embeddings.available(), 'alfred_available': llm.available(), 'library': bool(settings.get('LIBRARY_ENABLED')), 'library_review': library_review(u), 'chat_model': settings.get('CHAT_MODEL'),
+    review = library_review(u)
+    return {'published': pub, 'draft': dr, 'four_eyes': versions.four_eyes(), 'draft_editors': versions.editors(dr) if dr else [], 'embeddings_configured': embeddings.available(), 'alfred_available': llm.available(), 'library': bool(settings.get('LIBRARY_ENABLED')), 'library_review': sum(review.values()), 'library_review_by': review, 'chat_model': settings.get('CHAT_MODEL'),
             'embedding_model': config.EMBEDDING_MODEL, 'missing_embeddings': indexer.missing(pub) if pub else None,
             'versions': versions.list_versions()}
 
@@ -882,6 +884,13 @@ async def storage_test(u=Depends(auth.admin_user)):
     """Try the saved storage settings: write a probe (local) or reach the bucket (S3)."""
     from .library import storage
     return await run_in_threadpool(storage.check)
+
+
+@app.post('/api/admin/converter/test')
+async def converter_test(u=Depends(auth.admin_user)):
+    """Reach the optional document converter with the saved address and password."""
+    from .library import converter
+    return await run_in_threadpool(converter.check)
 
 
 @app.post('/api/admin/llm/test')

@@ -2,6 +2,35 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [0.4.0] - 2026-11-19
+
+### Added
+- **Figures in documents.** Screenshots, diagrams, charts and pictures are now read where they sit, in PDF, Word, PowerPoint and web pages.
+  - With an AI model that reads images, each figure that carries information is described for someone who cannot see it, using the text around it for names and context. The description goes into the document's text where the figure sits, marked as the model's words: `[Figure 3, page 4, described by AI: …]`. The source page, topics and claims then use it like any other text.
+  - Charts in Word and PowerPoint are read from the values stored in the file, with no AI: `[Chart 1, slide 5: Revenue]` followed by their rows.
+  - Without AI, or over the limit, a figure keeps its caption or alt text (placeholders such as *image1.png* are ignored).
+  - Logos, icons, dividers, pictures marked decorative and images repeated on many pages are skipped before any model call. A screenshot used twice is described once, and the model can answer that a picture carries nothing.
+  - Figures with a caption, or that the text points to, are described first. *Most figures described per document* (`FIGURES_MAX`, 30) caps the cost; *Describe figures with the AI model* (`FIGURES_DESCRIBE`, on) turns it off.
+  - The source says what happened, for example *14 figure(s): 9 described by AI, 5 skipped as decorative, repeated or too small*.
+- **Scanned pages describe their figures too.** The image model returns the page's exact text and, apart from it, what its photos, diagrams, signatures or stamps show. The text stays exactly as read. Local OCR still reads text only.
+- **Figures are kept with their source.** The images (except scanned pages, which cannot be cut up reliably) are stored with the document. They are listed on its page with what the text says about each, so a description can be checked against the picture. They are deleted with the source and replaced with a new version.
+- **`library_figure` for agents.** `library_source` lists a document's figures, each with the passage it sits in. The new `library_figure` tool returns one figure's details and its image as an MCP image block, for agents that read images; the others use the description in the text. Both are only for credentials that may see sources.
+- **Optional document converter** (`docker-compose.converter.yml`: LibreOffice in the Gotenberg image, on an internal network with no internet access). It draws PowerPoint slides whose diagram is built from shapes, and EMF or WMF pictures. Without it those figures are counted as *need the document converter*. New settings: *Document converter address* (`CONVERTER_URL`) and *password* (`CONVERTER_TOKEN`), with a test button on Settings > Library.
+- A captured web page's own images are downloaded when it is read, through the same address guard as web capture (at most 60, 10 MB each). An uploaded HTML file's linked images are not fetched.
+- SVG drawings are drawn on the server with resvg (new dependency `resvg-py`, MIT), after removing every reference to other files or addresses.
+- **Pictures that carry nothing never reach the model.** Empty pictures, flat colours and gradient banners are dropped before any call, and so are a web page's small icons. A light drawing on a transparent background (a white icon) is shown on dark grey so it is visible, and inline SVG drawings get the colours the page defines for them (CSS custom properties) and a font the server has.
+- **Descriptions are checked against the picture.** Before a description is kept, the picture is read on the server with Tesseract. A description that quotes labels the picture does not show was made up from the text around it, and is left out with a note (*N left out: their description named things the picture does not show*). The image model is also told to describe only what it can see and to answer NONE for icons and empty pictures.
+- **The collection stays chosen.** One *Collection* selector sits at the top of every Knowledge page, as *Ontology version* does for the model. The choice is remembered in the browser and used by every page; a link that names a collection (`?c=`) still opens it. Switching collection on a single item goes to that section's list in the new collection. Review and Interview say plainly when the chosen collection does not allow them.
+- **Review counts per collection.** The *Review* badge counts what waits in the collection you are working in. The selector shows each collection's count, and the Review page lists the other collections with items waiting. `/api/status` gains `library_review_by` (collection id -> count).
+
+### Changed
+- *Model that reads images and scanned pages (OCR)* is now *Model that reads images, scanned pages and figures*.
+- Documents already in a collection get their figures when they are replaced with a new version or uploaded again.
+- A captured web page downloads each image address once (pages repeat the same picture in every card).
+
+### Fixed
+- **The test suite no longer touches the app's data roles.** Login roles belong to the whole PostgreSQL server: tests run against the same server reset the passwords of the app's read-only data roles (`sd_…`) with the test key, and the app then could not read its data (*couldn't get a connection*). Tests now use their own roles (`SYNTH_ROLE_PREFIX`, `sdtest_` in the suite). If it happened to you, building the demo data again sets the passwords back.
+
 ## [0.3.2] - 2026-11-18
 
 ### Added

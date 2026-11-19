@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { Pill } from '../components/ui.jsx'
+import { useStudio } from '../context.jsx'
 
 function Kinds({ title, help, kind, rows, protectedNames, canEdit, base, reload, setErr }) {
   const [adding, setAdding] = useState(false), [form, setForm] = useState({ name: '', description: '', inverse_name: '' }), [edit, setEdit] = useState(null), [merge, setMerge] = useState(null)
@@ -42,9 +43,10 @@ function Kinds({ title, help, kind, rows, protectedNames, canEdit, base, reload,
 
 export default function VocabularyPage() {
   const [params, setParams] = useSearchParams()
-  const [cols, setCols] = useState(null), [v, setV] = useState(null), [err, setErr] = useState('')
+  const [v, setV] = useState(null), [err, setErr] = useState('')
   const cid = params.get('c'), base = `/api/library/collections/${cid}/vocabulary`
-  useEffect(() => { api.get('/api/library/collections').then((d) => { const mine = d.collections.filter((c) => c.level); setCols(mine); if (!cid && mine[0]) setParams({ c: (mine.find((c) => c.level === 'manage') || mine[0]).id }, { replace: true }) }).catch((e) => setErr(e.message)) }, [])
+  const { collections } = useStudio()                       // the shell's bar chooses the collection; this page reads it
+  const cols = collections ? collections.filter((c) => c.level) : null
   const load = () => cid && api.get(base).then(setV).catch((e) => setErr(e.message))
   useEffect(() => { setV(null); load() }, [cid])
   const canEdit = cols?.find((c) => c.id === cid)?.level === 'manage'
@@ -54,7 +56,6 @@ export default function VocabularyPage() {
     <>
       <div className="row" style={{ marginBottom: 14 }}>
         <div><h1>Vocabulary</h1><div className="muted">The kinds of topic and of relation this collection uses. They belong to the collection alone: nothing here changes the data model or any other collection.</div></div>
-        {cols?.length > 0 && <select className="right" style={{ width: 'auto' }} value={cid || ''} onChange={(e) => setParams({ c: e.target.value })}>{cols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
       </div>
       {err && <div className="banner bad">{err}</div>}
       {cols && !canEdit && cid && <p className="small muted">You can read this; changing it needs the manager role on the collection.</p>}

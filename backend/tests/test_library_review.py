@@ -210,6 +210,7 @@ def test_the_collections_inbox_is_one_queue_for_everyone_who_can_write_and_the_m
     assert len(inbox['held_changes']) == 1 and [l['name'] for l in inbox['suggested_links']] == ['Customer'] and inbox['suggested_links'][0]['label'] == 'is about'
     assert [p['name'] for p in inbox['vocabulary']['proposals']] == ['Gadget'] and inbox['vocabulary']['can_decide'] is True
     assert client.get('/api/status').json()['library_review'] == 3                                    # held change + suggested link + vocabulary proposal
+    assert client.get('/api/status').json()['library_review_by'] == {a: 3}                            # ...all in this collection
     _as(client, 'ed')                                                                                  # another editor: the same queue, but the vocabulary is not theirs to decide
     ed = client.get(f'/api/library/collections/{a}/inbox').json()
     assert len(ed['held_changes']) == 1 and ed['vocabulary']['can_decide'] is False and client.get('/api/status').json()['library_review'] == 2

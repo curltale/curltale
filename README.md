@@ -9,9 +9,9 @@ The hippocampus is the part of the brain that turns experience into lasting, con
 It has two halves that share one login, one settings page, one activity log, one MCP endpoint and one built-in assistant, **Alfred**:
 
 - **The ontology** is a governed model of your data: entities, fields, relationships, and the words people use ("open", "active", "unpaid") as exact conditions. It is versioned, reviewed and published like code, and it turns a question in plain language into one correct, read-only SQL statement on your own database, under the same access rules every time.
-- **The knowledge library** is what people know about the business, kept in documents, web pages and heads. Files, pages and interviews become cited, reviewable topic pages in isolated **collections**, each with its own access. Every fact carries its exact quote and the source it came from. Topics can point at model entities ("this policy governs Invoice"), but the model never contains document content.
+- **The knowledge library** is what people know about the business, kept in documents, web pages and heads. Files, pages and interviews become cited, reviewable topic pages in isolated **collections**, each with its own access. Screenshots, diagrams and charts are read too: described where they sit, and kept with their document. Every fact carries its exact quote and the source it came from. Topics can point at model entities ("this policy governs Invoice"), but the model never contains document content.
 
-Agents reach both through an MCP server with sixteen read-only tools. People reach both through the app and Alfred.
+Agents reach both through an MCP server with seventeen read-only tools. People reach both through the app and Alfred.
 
 It runs on your infrastructure: two containers to start (the app and PostgreSQL), plus optional ones when you need them. Your data stays in your database; Curltale reads it read-only, on demand. Open source, MIT.
 
@@ -63,7 +63,7 @@ claude mcp add --transport http curltale https://<your-host>/mcp --header "Autho
 | Path | What it is |
 |---|---|
 | `docker-compose.example.yml` | The two core services: `db` (PostgreSQL 16 with pgvector) and `app`. |
-| `docker-compose.worker.yml`, `docker-compose.fetcher.yml`, `docker-compose.storage.yml`, `docker-compose.demo.yml` | Optional services, added with `-f`: a worker, a browser service for JavaScript pages, an S3 bucket, demo databases. See [Optional services](https://kb.curltale.com/admin/optional/). |
+| `docker-compose.worker.yml`, `docker-compose.fetcher.yml`, `docker-compose.converter.yml`, `docker-compose.storage.yml`, `docker-compose.demo.yml` | Optional services, added with `-f`: a worker, a browser service for JavaScript pages, a document converter for Office diagrams, an S3 bucket, demo databases. See [Optional services](https://kb.curltale.com/admin/optional/). |
 | `.env.example` | Every setting, marked required or optional. The [settings reference](https://kb.curltale.com/admin/settings/) explains each. |
 | `backend/` | The FastAPI app (`backend/studio/`) and its tests. |
 | `frontend/` | The React UI. |

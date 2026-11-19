@@ -4,19 +4,51 @@ import SafeMarkdown from '../components/SafeMarkdown.jsx'
 import { api } from '../api.js'
 import { Pill } from '../components/ui.jsx'
 import { UsagePill } from './CollectionsPage.jsx'
+import { rememberCollection } from '../components/collection.js'
 
 export const WIKI = { approved: ['Page approved', 'ok'], needs_review: ['Needs review', 'warn'], skipped: ['No page (AI off)', ''], failed: ['Page failed', 'bad'], none: ['No page yet', ''] }
 const VERDICT = { PASS: ['Passed', 'ok'], FAIL: ['Problems found', 'warn'], ERROR: ['Checker gave no result', 'bad'] }
 const ISSUE = { UNSUPPORTED: 'not in the document', TOO_BROAD: 'broader than the document', TOO_SPECIFIC: 'more specific than the document', MISSING_QUALIFIER: 'a qualifier is missing', MISSING_FACT: 'a fact is missing',
   AMBIGUOUS_ENTITY: 'unclear which entity', UNCLEAR_RELATIONSHIP: 'unclear relationship', NUMERIC_MISMATCH: 'number differs', CONDITION_LOSS: 'a condition was lost', SOURCE_REFERENCE: 'refers to the document', OTHER: 'other' }
 
+const BY = { ai: ['Described by AI', 'accent'], caption: ['Caption only', ''], alt: ['Alt text only', ''], data: ['Values from the file', 'ok'] }
+
+// The figures read from the document: the kept image (the original evidence) next to what the text now says about it
+function Figures({ figs, base }) {
+  const [open, setOpen] = useState(null)
+  return (
+    <div className="card" style={{ marginBottom: 22 }}>
+      <strong>Figures</strong>
+      <p className="small muted" style={{ margin: '4px 0 10px' }}>Read from the document. A description by AI is in the text where the figure sits, marked as such: compare it with the image.</p>
+      {figs.map((f) => {
+        const [bl, bt] = BY[f.described_by] || ['Not described', '']
+        const text = f.described_by === 'ai' || f.described_by === 'data' ? f.description : f.described_by === 'caption' ? f.caption : f.described_by === 'alt' ? f.alt : ''
+        return (
+          <div key={f.id} style={{ borderTop: '1px solid var(--line)', padding: '10px 0' }}>
+            <div className="row"><b className="small">{f.label}</b>{f.location && <span className="small muted">{f.location}</span>}<Pill tone={bt}>{bl}</Pill>{f.same_as && <span className="small muted">same image as {f.same_as}</span>}</div>
+            {f.caption && <div className="small" style={{ marginTop: 4 }}>{f.caption}</div>}
+            {f.has_image && <button type="button" className="linkish" style={{ display: 'block', marginTop: 6, padding: 0, border: 0, background: 'none', cursor: 'zoom-in', maxWidth: '100%' }} onClick={() => setOpen(f)} aria-label={`Show ${f.label} larger`}>
+              <img src={`${base}/${f.id}`} alt={f.alt || f.caption || f.label} loading="lazy" style={{ maxWidth: '100%', maxHeight: 220, border: '1px solid var(--line)', borderRadius: 6, background: '#fff' }} /></button>}
+            {text && f.described_by !== 'caption' && <div className="small muted" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>{text}</div>}
+          </div>)
+      })}
+      {open && <div role="dialog" aria-modal="true" aria-label={open.label} onClick={() => setOpen(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.72)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, cursor: 'zoom-out' }}>
+        <img src={`${base}/${open.id}`} alt={open.alt || open.caption || open.label} style={{ maxWidth: '100%', maxHeight: '100%', background: '#fff', borderRadius: 6 }} /></div>}
+    </div>
+  )
+}
+
 export default function SourcePage() {
   const { sid } = useParams()
   const [params] = useSearchParams()
   const cid = params.get('c')
+  useEffect(() => { rememberCollection(cid) }, [cid])
   const [ver, setVer] = useState(null), [d, setD] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(false), [draft, setDraft] = useState(null), [waiting, setWaiting] = useState(false)
+  const [figs, setFigs] = useState([])
   const load = () => api.get(`/api/library/collections/${cid}/sources/${sid}/wiki${ver ? `?version=${ver}` : ''}`).then((x) => { setD(x); setErr('') }).catch((e) => setErr(e.message))
   useEffect(() => { load() }, [sid, ver])
+  const status = d?.source.status
+  useEffect(() => { if (status === 'ready') api.get(`/api/library/collections/${cid}/sources/${sid}/figures`).then((x) => setFigs(x.figures)).catch(() => setFigs([])) }, [sid, status])
   const checked = d && d.checks.some((c) => c.version === d.versions[0]?.version)
   const timer = useRef()
   useEffect(() => {                                              // after an edit, wait for the check of that version
@@ -82,6 +114,7 @@ export default function SourcePage() {
           </div>
         </div>
         <aside style={{ flex: '1 1 320px', minWidth: 0 }} aria-label="Checks">
+          {figs.length > 0 && <Figures figs={figs} base={`/api/library/collections/${cid}/sources/${sid}/figures`} />}
           <div className="card">
             <strong>Checks</strong>
             {s.wiki_status === 'needs_review' && <div className="banner" style={{ marginTop: 10 }}>The checker still has objections after the corrections. Read them, then approve the page as it is, or write it again.</div>}

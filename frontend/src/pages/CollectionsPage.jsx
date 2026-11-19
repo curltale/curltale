@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { useStudio } from '../context.jsx'
 import { Modal, Pill } from '../components/ui.jsx'
+import { currentCollection, rememberCollection } from '../components/collection.js'
 
 const USAGE = { public: ['Public', 'ok', 'May be shared with customers.'], internal: ['Internal', 'warn', "For the agent's own understanding. Do not quote it or refer to it with customers."] }
 const LEVEL_TEXT = { manage: 'Manage', write: 'Write', read: 'Read' }
@@ -71,7 +72,7 @@ export default function CollectionsPage() {
   const { user, status } = useStudio()
   const [data, setData] = useState(null), [sel, setSel] = useState(null), [form, setForm] = useState(null), [err, setErr] = useState('')
   const admin = user.role === 'admin'
-  const load = () => api.get('/api/library/collections').then((d) => { setData(d.collections); setSel((s) => s && d.collections.find((c) => c.id === s) ? s : (d.collections.find((c) => c.level === 'manage') || {}).id || null) }).catch((e) => setErr(e.message))
+  const load = () => api.get('/api/library/collections').then((d) => { setData(d.collections); setSel((s) => s && d.collections.find((c) => c.id === s) ? s : (d.collections.find((c) => c.id === currentCollection() && c.level) || d.collections.find((c) => c.level === 'manage') || {}).id || null) }).catch((e) => setErr(e.message))
   useEffect(() => { load() }, [])
   if (status && status.library === false) return <p className="muted">The Library is switched off (Settings, Library).</p>
   const cur = data?.find((c) => c.id === sel)
@@ -84,7 +85,7 @@ export default function CollectionsPage() {
       {err && <div className="banner bad">{err}</div>}
       <div className="grid cols-2">
         {(data || []).map((c) => c.level ? (
-          <div key={c.id} className="card" style={{ cursor: 'pointer', borderColor: c.id === sel ? 'var(--accent)' : undefined }} onClick={() => setSel(c.id)}>
+          <div key={c.id} className="card" style={{ cursor: 'pointer', borderColor: c.id === sel ? 'var(--accent)' : undefined }} onClick={() => { setSel(c.id); if (c.level) rememberCollection(c.id) }}>
             <div className="row" style={{ gap: 8 }}><strong style={{ fontSize: 15 }}>{c.name}</strong><UsagePill usage={c.usage} /><span className="right"><Pill tone={c.level === 'manage' ? 'accent' : ''}>{LEVEL_TEXT[c.level]}</Pill></span></div>
             <p className="muted small" style={{ margin: '6px 0 0' }}>{c.description || 'No description.'}</p>
             {(!c.allow_ai || !c.agents_may_read) && <div className="row" style={{ marginTop: 6 }}>{!c.allow_ai && <Pill tone="warn">AI off</Pill>}{!c.agents_may_read && <Pill tone="warn">Agents blocked</Pill>}</div>}

@@ -3,7 +3,7 @@ The wiki steps (writing, verifying, finding topics) are added after this one. Ea
 import hashlib
 from .. import config, embeddings, llm, settings, vectors
 from ..db import conn, J
-from . import bridge, chunking, extract, fetch, interview, jobs, localocr, scope as S, storage, topics, wiki
+from . import bridge, chunking, converter, extract, fetch, figures, interview, jobs, localocr, scope as S, storage, topics, wiki
 
 BATCH = 16
 MAX_FILE_BYTES = 500 * 1024 * 1024
@@ -12,6 +12,58 @@ MAX_FILE_BYTES = 500 * 1024 * 1024
 def _fail(src_id, message):
     with conn() as c:
         c.execute("UPDATE library.source SET status='failed', error=%s, wiki_status=CASE WHEN wiki_status='none' THEN 'failed' ELSE wiki_status END WHERE id=%s", (message[:300], src_id))
+
+
+def figure_options(src, use_ai):
+    """How this document's figures are read: described by the image model when AI may be used, drawn by the converter when there is one, and for a
+    captured web page its images downloaded through the address guard."""
+    describe = use_ai and bool(settings.get('FIGURES_DESCRIBE'))
+    url = src['url'] if src['kind'] == 'url' and src.get('url') else None
+    ground = None
+    if describe and localocr.available():                               # a check, on this server, that a description quotes what the picture shows
+        def ground(image):
+            import io
+            from PIL import Image
+            im = Image.open(io.BytesIO(image)).convert('RGB')
+            if max(im.size) < 1000:                                    # Tesseract reads small labels better when they are larger
+                k = 1000 / max(im.size)
+                im = im.resize((int(im.width * k), int(im.height * k)))
+            buf = io.BytesIO()
+            im.save(buf, 'PNG')
+            return localocr.read(buf.getvalue(), settings.get('OCR_LOCAL_LANGUAGES'), 0).text
+    return figures.Options(describe=llm.describe_figure if describe else None, max_described=int(settings.get('FIGURES_MAX') or 0), ground=ground,
+                           converter=converter.to_pdf if converter.available() else None,
+                           fetch=figures.fetcher(fetch.allowed_hosts()) if url else None, base_url=url)
+
+
+def _figure_key(col, sid, f):
+    return f"{col}/{sid}/figures/{f.sha256[:40]}.{'jpg' if f.mime == 'image/jpeg' else 'png'}"
+
+
+def store_figures(col, sid, figs):
+    """Put the figures' images in storage (once per image). -> rows for library.source_figure."""
+    import io
+    rows, put = [], set()
+    for f in figs:
+        key = None
+        if f.png is not None and f.sha256:
+            key = _figure_key(col, sid, f)
+            if key not in put:
+                storage.store().put(key, io.BytesIO(f.png))
+                put.add(key)
+        rows.append((col, sid, f.label, f.kind, f.location, key, f.mime if key else None, f.sha256 if key else None, f.width if key else None, f.height if key else None,
+                     f.caption or '', f.alt or '', f.description or '', f.described_by, f.same_as, f.char_start))
+    return rows
+
+
+def replace_figures(c, col, sid, rows):
+    """In the ingest transaction: the source's figures become `rows`. -> storage keys no longer used (delete them after the commit)."""
+    old = {r['storage_key'] for r in c.execute('SELECT storage_key FROM library.source_figure WHERE source_id=%s AND collection_id=%s AND storage_key IS NOT NULL', (sid, col)).fetchall()}
+    c.execute('DELETE FROM library.source_figure WHERE source_id=%s AND collection_id=%s', (sid, col))
+    for r in rows:
+        c.execute('INSERT INTO library.source_figure (collection_id,source_id,label,kind,location,storage_key,mime,sha256,width,height,caption,alt,description,described_by,same_as,char_start) '
+                  'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)', r)
+    return old - {r[5] for r in rows if r[5]}
 
 
 def embed_chunks(rows, ctx=None, lo=50, hi=95):
@@ -62,9 +114,15 @@ def ingest(job, ctx):
                 local_errors.append(str(e)[:120])
                 return ''
 
+        fig_opts = figure_options(src, use_ai)
+        scan_figures = fig_opts.describe is not None
+
         def ocr(png, mime):
             if use_ai:
                 try:
+                    if scan_figures:                                     # the page's text, and apart from it what its pictures show
+                        text, figs = figures.split_scan(llm.ocr(png, mime, figures=True))
+                        return extract.OcrText(text, 'OCR', figures=figs)
                     return llm.ocr(png, mime)
                 except Exception as e:                                   # one unreadable page must not lose the others
                     ocr_errors.append(f'{type(e).__name__}: {str(e)[:120]}')
@@ -72,15 +130,17 @@ def ingest(job, ctx):
                         return ''
             return read_local(png)                                       # no AI model for this page: Tesseract, with its confidence checked
         fname = src['storage_key'].rsplit('/', 1)[-1]                    # the stored file's own name decides how it is read (a web page is stored as page.html)
-        res = extract.extract(fname, data, ocr if (use_ai or use_local) else None, settings.get('OCR_MAX_PAGES'))
+        res = extract.extract(fname, data, ocr if (use_ai or use_local) else None, settings.get('OCR_MAX_PAGES'), figures=fig_opts)
         if ocr_errors:
             res.notes.append(f'the OCR model failed on {len(ocr_errors)} page(s){", read with local OCR instead" if use_local else ""}: {ocr_errors[0]}')
         if local_errors:
             res.notes.append(f'local OCR failed on {len(local_errors)} page(s): {local_errors[0]}')
 
+        fig_rows = store_figures(col, sid, res.figures) if res.figures else []
         ctx.progress('splitting into passages', 40)
         parts = chunking.chunk(res.text)
         with conn() as c:
+            unused = replace_figures(c, col, sid, fig_rows)
             c.execute('DELETE FROM library.source_chunk WHERE source_id=%s AND collection_id=%s', (sid, col))
             c.execute('DELETE FROM library.source_text WHERE source_id=%s AND collection_id=%s', (sid, col))
             c.execute('INSERT INTO library.source_text (source_id,collection_id,title,text,extractor) VALUES (%s,%s,%s,%s,%s)', (sid, col, res.title, res.text, fname.rsplit('.', 1)[-1].lower()))
@@ -88,6 +148,11 @@ def ingest(job, ctx):
             for p in parts:
                 ids.append(c.execute('INSERT INTO library.source_chunk (collection_id,source_id,idx,text,tokens,char_start,char_end,heading_path,location) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id',
                                      (col, sid, p['idx'], p['text'], p['tokens'], p['char_start'], p['char_end'], p['heading_path'], p['location'])).fetchone()['id'])
+        for key in unused:                                                  # images of the previous version that this one no longer has
+            try:
+                storage.store().delete(key)
+            except Exception:
+                pass
         embedded = 0
         if embeddings.available():
             ctx.progress('embedding passages', 50)
@@ -110,7 +175,8 @@ def ingest(job, ctx):
             except Exception as e:                                          # the passages are fine and searchable: only the page failed, and can be regenerated
                 wiki_status = 'failed'
                 res.notes.append(f'the source page could not be written: {type(e).__name__}: {str(e)[:200]}')
-        stats = {'chars': len(res.text), 'passages': len(parts), 'embedded': embedded, 'pages': res.pages, 'ocr_pages': res.ocr_pages, 'local_ocr_pages': res.local_ocr_pages, 'notes': res.notes}
+        stats = {'chars': len(res.text), 'passages': len(parts), 'embedded': embedded, 'pages': res.pages, 'ocr_pages': res.ocr_pages, 'local_ocr_pages': res.local_ocr_pages, 'notes': res.notes,
+                 **({'figures': res.figure_stats} if res.figure_stats.get('found') else {})}
         with conn() as c:
             c.execute("UPDATE library.source SET status='ready', error=NULL, title=%s, stats=%s, wiki_status=%s WHERE id=%s", (res.title, J(stats), wiki_status, sid))
         ctx.progress('done', 100)

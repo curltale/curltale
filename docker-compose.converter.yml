@@ -1,0 +1,31 @@
+# Optional: the document converter for the Library (LibreOffice, in the Gotenberg image). It draws the figures Python cannot: PowerPoint slides whose
+# diagram is built from shapes, and pictures stored as EMF or WMF (Visio drawings and pasted diagrams in Office files). Without it those figures are
+# counted as "need the document converter" on the source and everything else is read as usual.
+#   docker compose -f docker-compose.yml -f docker-compose.converter.yml up -d
+# (add -f docker-compose.worker.yml and -f docker-compose.fetcher.yml if you run those too). Put these in .env (or enter them on Settings > Library):
+#   CONVERTER_TOKEN=<long and random: openssl rand -hex 32>
+#   CONVERTER_URL=http://converter:3000
+# The converter has no database, no files and no app secrets. Its network is internal: it can answer the app (and the worker) but reach nothing
+# else, not even the internet, so a document that links to outside pictures or files cannot make it fetch them.
+services:
+  app:
+    networks: [default, convert]
+
+  converter:
+    image: gotenberg/gotenberg:8.39.0-libreoffice                  # LibreOffice only (no Chromium). Bump deliberately: each release carries a newer LibreOffice
+    restart: unless-stopped
+    command: [gotenberg, --api-enable-basic-auth, --log-level=warn, --libreoffice-restart-after=50, --api-timeout=180s]
+    environment:
+      GOTENBERG_API_BASIC_AUTH_USERNAME: curltale
+      GOTENBERG_API_BASIC_AUTH_PASSWORD: ${CONVERTER_TOKEN:?set CONVERTER_TOKEN in .env}
+    networks: [convert]
+    read_only: true
+    tmpfs: [/tmp, /home/gotenberg]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 1g
+
+networks:
+  convert:
+    internal: true

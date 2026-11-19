@@ -438,6 +438,25 @@ def library_source_search(query: Annotated[str, Field(description='Concept or ke
 
 
 READ_CHARS = 12000                                                            # most text one library_source call returns
+FIGURES_LISTED = 40
+FIGURE_SIDE = 1024                                                            # longest side of a figure handed to an agent
+
+
+def _figures_of(col, sid):
+    """A document's figures, each with the passage of its original text it sits in (read it with original=true and around=passage)."""
+    with conn() as c:
+        rows = c.execute('SELECT label, kind, location, caption, described_by, storage_key IS NOT NULL AS has_image, same_as, char_start FROM library.source_figure '
+                         'WHERE collection_id=%s AND source_id=%s ORDER BY char_start, id', (col.id, sid)).fetchall()
+        if not rows:
+            return []
+        spans = c.execute('SELECT idx, char_start, char_end FROM library.source_chunk WHERE collection_id=%s AND source_id=%s ORDER BY idx', (col.id, sid)).fetchall()
+    out = []
+    for r in rows:
+        at = next((p['idx'] for p in spans if p['char_start'] <= r['char_start'] < p['char_end']), None)
+        out.append({'figure': r['label'], **({'location': r['location']} if r['location'] else {}), **({'caption': r['caption']} if r['caption'] else {}),
+                    'described': {'ai': 'by AI', 'caption': 'caption only', 'alt': 'alt text only', 'data': 'values read from the file'}.get(r['described_by'], 'no'),
+                    'image': r['has_image'], **({'same_as': r['same_as']} if r['same_as'] else {}), **({'original_passage': at} if at is not None else {})})
+    return out
 
 
 def _window(rows, hits, window, budget):
@@ -487,6 +506,12 @@ def library_source(collection: Annotated[str, Field(description='Collection name
         return {**_head(col), 'error': f'no document {ref!r} in this collection (library_topic_sources names the documents behind a topic)'}
     sid = str(src['id'])
     head = {**_head(col), 'source_id': sid, 'name': src['title'] or src['name'], 'link': _source_link(col, sid), **({'url': src['url']} if src['url'] and access.shows_sources() else {})}
+    figs = _figures_of(col, sid) if access.shows_sources() else []
+    if figs:
+        head['figures'] = figs[:FIGURES_LISTED]
+        head['figures_note'] = ('Figures of this document (screenshots, diagrams, charts). Their descriptions are in the text, marked "described by AI" (the model\'s '
+                                'words, not the document\'s). library_figure returns a figure with its image, if you can read images.' +
+                                (f' {len(figs) - FIGURES_LISTED} more are not listed.' if len(figs) > FIGURES_LISTED else ''))
     if original:
         with conn() as c:
             total = c.execute('SELECT count(*) AS n FROM library.source_chunk WHERE collection_id=%s AND source_id=%s', (col.id, sid)).fetchone()['n']
@@ -524,6 +549,55 @@ def library_source(collection: Annotated[str, Field(description='Collection name
 
 
 @_safe
+def library_figure(collection: Annotated[str, Field(description='Collection name, slug or id')],
+                   source: Annotated[str, Field(description='The document: its `source_id` or its exact file name (library_source lists its figures)')],
+                   figure: Annotated[str, Field(description='The figure as library_source lists it, e.g. "Figure 3" or "Chart 1" (a number alone means a Figure)')]) -> dict:
+    """One figure of a source document (a screenshot, diagram, chart, picture): where it sits, its caption, what the text says about it, and the
+    image itself for an agent that can read images. Use it when a step, a screen or a diagram matters to the answer and the description is not
+    enough. A description marked "described by AI" is the image model's words, not the document's: the image is the evidence.
+    Each result carries its collection's usage tag: `public` may be shared with customers; `internal` is for your understanding only, do not quote it to customers."""
+    if not access.shows_sources():
+        raise RuntimeError('figures are shown only to a credential that may see sources')
+    col = _pick(collection)
+    ref = (source or '').strip()
+    want = (figure or '').strip()
+    want = f'Figure {want}' if want.isdigit() else want
+    with conn() as c:
+        src = c.execute('SELECT id, name, title FROM library.source WHERE collection_id=%s AND (id::text=%s OR lower(name)=lower(%s)) ORDER BY created_at DESC LIMIT 1', (col.id, ref, ref)).fetchone()
+        if not src:
+            return {**_head(col), 'error': f'no document {ref!r} in this collection'}
+        f = c.execute('SELECT label, kind, location, storage_key, mime, width, height, caption, alt, description, described_by, same_as FROM library.source_figure '
+                      'WHERE collection_id=%s AND source_id=%s AND lower(label)=lower(%s)', (col.id, src['id'], want)).fetchone()
+    head = {**_head(col), 'source_id': str(src['id']), 'name': src['title'] or src['name'], 'link': _source_link(col, str(src['id']))}
+    if not f:
+        return {**head, 'error': f'no {want!r} in this document: library_source lists its figures'}
+    out = {**head, 'figure': f['label'], 'kind': f['kind'], **({'location': f['location']} if f['location'] else {}), **({'caption': f['caption']} if f['caption'] else {}),
+           **({'alt_text': f['alt']} if f['alt'] else {}), **({'same_as': f['same_as']} if f['same_as'] else {})}
+    if f['described_by'] == 'ai':
+        out['description'] = f['description']
+        out['description_note'] = 'Written by the AI model that read the figure, not by the document: check it against the image.'
+    elif f['described_by'] == 'data' and f['description']:
+        out['values'] = f['description']
+    if not f['storage_key']:
+        out['image'] = None
+        out['note'] = 'No image is kept for this figure (a chart is read from its values; a scanned page is only described).'
+        return out
+    from . import figures, storage
+    try:
+        with storage.store().open(f['storage_key']) as fh:
+            data = fh.read()
+    except Exception:
+        return {**out, 'image': None, 'note': 'The image could not be read from storage.'}
+    im = figures._open(data)
+    if im is None:
+        return {**out, 'image': None, 'note': 'The image could not be read.'}
+    data, mime = figures._encode(im, FIGURE_SIDE)
+    out['image'] = {'mime': mime, 'attached': True}
+    out['_image'] = (data, 'jpeg' if mime == 'image/jpeg' else 'png')
+    return out
+
+
+@_safe
 def library_vocabulary(collection: Annotated[str | None, Field(description='Collection name, slug or id; omit for all you may read')] = None) -> dict:
     """The topic types and relation types (with their meaning and inverse) of a collection: the vocabulary its topics and links use.
     Each result carries its collection's usage tag: `public` may be shared with customers; `internal` is for your understanding only, do not quote it to customers."""
@@ -538,7 +612,7 @@ def library_vocabulary(collection: Annotated[str | None, Field(description='Coll
 
 LIBRARY = {'library_context': library_context, 'library_search': library_search, 'library_topic': library_topic, 'library_topic_claims': library_topic_claims,
            'library_topic_sources': library_topic_sources, 'library_traverse': library_traverse, 'library_source_search': library_source_search,
-           'library_source': library_source, 'library_vocabulary': library_vocabulary, 'library_collections': library_collections}
+           'library_source': library_source, 'library_figure': library_figure, 'library_vocabulary': library_vocabulary, 'library_collections': library_collections}
 
 
 def related_documents(entity_key, limit=5):

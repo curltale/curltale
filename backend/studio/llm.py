@@ -83,11 +83,37 @@ OCR_PROMPT = ('Transcribe all the text in this image exactly as written, in read
               'Do not describe the image, do not add comments, and do not translate. If there is no text, answer with nothing.')
 
 
-def ocr(image_png, mime='image/png'):
-    """Text of an image through the vision model set for OCR (it must accept images). Used for scanned pages and pictures."""
+OCR_FIGURES_PROMPT = ('Transcribe all the text in this image exactly as written, in reading order. Keep headings, lists and tables readable (tables as rows with " | "). '
+                      'Do not add comments, and do not translate.\n\n'
+                      'Then, only if the image also has visual content that carries information beyond its text (a photo, diagram, chart, screenshot, map, '
+                      'drawing, signature or stamp), add a line with exactly [[FIGURES]] and below it describe each such element for someone who cannot see it: '
+                      'what it shows, its labels and values exactly as written, and what it points out. Write in the language of the text. Do not describe '
+                      'layout, fonts, colours or decoration, and do not repeat the transcribed text. If there is no such content, do not add the line. '
+                      'If there is no text, answer with only the [[FIGURES]] part, or with nothing.')
+
+
+def _image_part(image, mime):
     import base64
-    data = f"data:{mime};base64,{base64.b64encode(image_png).decode()}"
-    return chat([{'role': 'user', 'content': [{'type': 'text', 'text': OCR_PROMPT}, {'type': 'image_url', 'image_url': {'url': data}}]}], role='ocr', max_tokens=4000, temperature=0, timeout=180)
+    return {'type': 'image_url', 'image_url': {'url': f"data:{mime};base64,{base64.b64encode(image).decode()}"}}
+
+
+def ocr(image_png, mime='image/png', figures=False):
+    """Text of an image through the vision model set for OCR (it must accept images). Used for scanned pages and pictures.
+    figures=True also asks for a description of the page's pictures and diagrams, after a [[FIGURES]] line (figures.split_scan separates them)."""
+    return chat([{'role': 'user', 'content': [{'type': 'text', 'text': OCR_FIGURES_PROMPT if figures else OCR_PROMPT}, _image_part(image_png, mime)]}], role='ocr', max_tokens=4000, temperature=0, timeout=180)
+
+
+def describe_figure(image, mime, context):
+    """A figure of a document described for someone who cannot see it, with the text around it (figures.resolve gives it). 'NONE' when it carries nothing."""
+    from pathlib import Path
+    system = (Path(__file__).parent / 'library' / 'prompts' / 'figure.md').read_text()
+    lines = [f'Document: {context.get("title") or "(untitled)"}']
+    for key, label in (('location', 'Where'), ('section', 'Section'), ('caption', 'Caption'), ('alt', 'Alt text')):
+        if context.get(key):
+            lines.append(f'{label}: {context[key]}')
+    lines += ['', 'Text before the figure:', context.get('before') or '(none)', '', 'Text after the figure:', context.get('after') or '(none)']
+    return chat([{'role': 'system', 'content': system}, {'role': 'user', 'content': [{'type': 'text', 'text': '\n'.join(lines)}, _image_part(image, mime)]}],
+                role='ocr', max_tokens=900, temperature=0, timeout=180)
 
 
 def test():

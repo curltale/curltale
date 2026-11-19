@@ -40,6 +40,7 @@ services:
   # Optional services live in their own files, added with -f (nothing here to uncomment):
   #   docker-compose.worker.yml   a separate container for the Library's background work
   #   docker-compose.fetcher.yml  the browser service, for web pages that need JavaScript
+  #   docker-compose.converter.yml  the document converter (LibreOffice), for PowerPoint diagrams built from shapes and EMF/WMF pictures
   #   docker-compose.storage.yml  an S3-compatible bucket for the Library's original files
   #   docker-compose.demo.yml     demo databases for trying the connectors
   # Example: docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.fetcher.yml -f docker-compose.storage.yml up -d --build

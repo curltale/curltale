@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api.js'
 import SafeMarkdown from '../components/SafeMarkdown.jsx'
 import { Pill } from '../components/ui.jsx'
+import { useStudio } from '../context.jsx'
 
 const KIND = { contradiction: ['Contradicts what the page says', 'warn'], duplicate_topic: ['Probably the same subject as another topic', 'accent'] }
 
@@ -17,20 +18,25 @@ function Section({ title, hint, count, children }) {
 
 export function ReviewList() {
   const [params, setParams] = useSearchParams()
-  const [cols, setCols] = useState(null), [d, setD] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(false)
+  const [d, setD] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(false)
   const cid = params.get('c'), base = `/api/library/collections/${cid}`
-  useEffect(() => { api.get('/api/library/collections').then((x) => { const mine = x.collections.filter((c) => c.level === 'write' || c.level === 'manage'); setCols(mine); if (!cid && mine[0]) setParams({ c: mine[0].id }, { replace: true }) }).catch((e) => setErr(e.message)) }, [])
-  const load = () => cid && api.get(`${base}/inbox`).then((x) => { setD(x); setErr('') }).catch((e) => setErr(e.message))
-  useEffect(() => { setD(null); load() }, [cid])
-  const act = async (fn) => { setBusy(true); try { await fn(); await load() } catch (e) { setErr(e.message) } setBusy(false) }
+  const { collections, status } = useStudio()               // the shell's bar chooses the collection; this page reads it
+  const cols = collections ? collections.filter((c) => c.level === 'write' || c.level === 'manage') : null
+  const allowed = !cols || cols.some((c) => c.id === cid)          // a collection this page cannot be used on: nothing is asked for
+  const load = () => cid && allowed && api.get(`${base}/inbox`).then((x) => { setD(x); setErr('') }).catch((e) => setErr(e.message))
+  useEffect(() => { setD(null); load() }, [cid, allowed])
+  const act = async (fn) => { setBusy(true); try { await fn(); await load(); window.dispatchEvent(new Event('studio:changed')) } catch (e) { setErr(e.message) } setBusy(false) }
   const manager = d?.vocabulary.can_decide
+  const waiting = status?.library_review_by || {}
+  const others = (cols || []).filter((c) => c.id !== cid && waiting[c.id] > 0)
   return (
     <>
       <div className="row" style={{ marginBottom: 14 }}>
         <div><h1>Review</h1><div className="muted">What in this collection waits for a person. Everyone who can write in the collection sees the same queue and can decide on its content; the collection's manager also decides the vocabulary.</div></div>
-        {cols?.length > 0 && <select className="right" style={{ width: 'auto' }} value={cid || ''} onChange={(e) => setParams({ c: e.target.value })}>{cols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
       </div>
+      {others.length > 0 && <div className="banner" style={{ marginBottom: 14 }}>Also waiting: {others.map((c, i) => <span key={c.id}>{i ? ', ' : ''}<Link to={`/library/review?c=${c.id}`}>{c.name}</Link> ({waiting[c.id]})</span>)}</div>}
       {cols && !cols.length && <p className="muted">You need write access to a collection (and the editor role) to review it.</p>}
+      {cols?.length > 0 && cid && !cols.some((c) => c.id === cid) && <div className="banner">You need write access to this collection (and the editor role) to review it. Choose another collection above.</div>}
       {err && <div className="banner bad">{err}</div>}
       {d && <>
         <Section title="Held changes" hint="They contradict a published page, or look like an existing topic. Readers still see the old page." count={d.held_changes.length}>
@@ -78,6 +84,7 @@ export function ConflictPage() {
   const { kid } = useParams()
   const [params] = useSearchParams()
   const cid = params.get('c')
+  useEffect(() => { rememberCollection(cid) }, [cid])
   const [d, setD] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(''), [notice, setNotice] = useState('')
   const url = `/api/library/collections/${cid}/conflicts/${kid}`
   const load = () => api.get(url).then((x) => { setD(x); return x }).catch((e) => setErr(e.message))

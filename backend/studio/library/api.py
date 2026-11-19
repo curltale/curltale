@@ -430,6 +430,36 @@ def download_original(ref: str, sid: str, sc=Depends(scope_of)):
     return _download(r['name'], 'application/octet-stream', gen())
 
 
+@router.get('/collections/{ref}/sources/{sid}/figures')
+def source_figures(ref: str, sid: str, sc=Depends(scope_of)):
+    """The figures read from a document: what the text says about each one, and whether its image is kept."""
+    col = S.open_collection(sc, ref)
+    with db.conn() as c:
+        if not c.execute('SELECT 1 FROM library.source WHERE id::text=%s AND collection_id=%s', (sid, col.id)).fetchone():
+            raise HTTPException(404, 'no such source')
+        rows = c.execute('SELECT id, label, kind, location, storage_key IS NOT NULL AS has_image, width, height, caption, alt, description, described_by, same_as '
+                         'FROM library.source_figure WHERE source_id::text=%s AND collection_id=%s ORDER BY char_start, id', (sid, col.id)).fetchall()
+    return {'figures': rows}
+
+
+@router.get('/collections/{ref}/sources/{sid}/figures/{fid}')
+def figure_image(ref: str, sid: str, fid: str, sc=Depends(scope_of)):
+    """One figure's kept image (PNG or JPEG), with the same access as the original file."""
+    col = S.open_collection(sc, ref)                                         # access first: the id is not even looked at before
+    if not fid.isdigit():
+        raise HTTPException(404, 'no such figure')
+    with db.conn() as c:
+        r = c.execute('SELECT storage_key, mime FROM library.source_figure WHERE id=%s AND source_id::text=%s AND collection_id=%s', (int(fid), sid, col.id)).fetchone()
+    if not r or not r['storage_key'] or not r['storage_key'].startswith(col.id + '/') or r['mime'] not in ('image/png', 'image/jpeg'):
+        raise HTTPException(404, 'no such figure')
+    try:
+        with storage.store().open(r['storage_key']) as fh:
+            data = fh.read()
+    except storage.StorageError as e:
+        raise HTTPException(502, str(e))
+    return Response(data, media_type=r['mime'], headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=3600', 'Content-Security-Policy': "default-src 'none'"})
+
+
 @router.get('/collections/{ref}/sources/{sid}/download/page')
 def download_page(ref: str, sid: str, version: int | None = None, sc=Depends(scope_of)):
     col = S.open_collection(sc, ref)
@@ -441,22 +471,33 @@ def download_page(ref: str, sid: str, version: int | None = None, sc=Depends(sco
     return _download(r['name'].rsplit('.', 1)[0] + '.md', 'text/markdown; charset=utf-8', iter([r['markdown'].encode()]))
 
 
-def review_count(sc):
-    """What waits for this person across their collections: held changes, pages with objections, suggested model links and failed documents where they can write,
-    and the analyzer's vocabulary proposals where they manage."""
+def review_counts(sc):
+    """What waits for this person, collection by collection: held changes, pages with objections, suggested model links and failed documents where they
+    can write, and the analyzer's vocabulary proposals where they manage. -> {collection id: count}, only collections with something waiting."""
     if sc.kind != 'user' or 'editor' not in sc.roles:
-        return 0
+        return {}
     ids = [cid for cid in sc.grants if sc.level(cid) in ('write', 'manage')]
     mine = [cid for cid in ids if sc.level(cid) == 'manage']
     if not ids:
-        return 0
+        return {}
+    out = {}
     with db.conn() as c:
-        q = lambda sql, arg: c.execute(sql, (arg,)).fetchone()['n']
-        return (q("SELECT count(*) AS n FROM library.source WHERE collection_id::text = ANY(%s) AND wiki_status='needs_review'", ids)
-                + q("SELECT count(*) AS n FROM library.topic_conflict WHERE collection_id::text = ANY(%s) AND status='open'", ids)
-                + q("SELECT count(*) AS n FROM library.topic_model_ref r JOIN library.topic t ON t.id=r.topic_id AND t.collection_id=r.collection_id WHERE r.collection_id::text = ANY(%s) AND r.status='suggested' AND t.status='active'", ids)
-                + q("SELECT count(*) AS n FROM library.source WHERE collection_id::text = ANY(%s) AND status='failed'", ids)
-                + (q("SELECT count(*) AS n FROM library.vocab_proposal WHERE collection_id::text = ANY(%s) AND status='pending'", mine) if mine else 0))
+        def add(sql, arg):
+            for r in c.execute(sql, (arg,)).fetchall():
+                out[str(r['cid'])] = out.get(str(r['cid']), 0) + r['n']
+        add("SELECT collection_id AS cid, count(*) AS n FROM library.source WHERE collection_id::text = ANY(%s) AND wiki_status='needs_review' GROUP BY 1", ids)
+        add("SELECT collection_id AS cid, count(*) AS n FROM library.topic_conflict WHERE collection_id::text = ANY(%s) AND status='open' GROUP BY 1", ids)
+        add("SELECT r.collection_id AS cid, count(*) AS n FROM library.topic_model_ref r JOIN library.topic t ON t.id=r.topic_id AND t.collection_id=r.collection_id "
+            "WHERE r.collection_id::text = ANY(%s) AND r.status='suggested' AND t.status='active' GROUP BY 1", ids)
+        add("SELECT collection_id AS cid, count(*) AS n FROM library.source WHERE collection_id::text = ANY(%s) AND status='failed' GROUP BY 1", ids)
+        if mine:
+            add("SELECT collection_id AS cid, count(*) AS n FROM library.vocab_proposal WHERE collection_id::text = ANY(%s) AND status='pending' GROUP BY 1", mine)
+    return {k: v for k, v in out.items() if v}
+
+
+def review_count(sc):
+    """Everything that waits for this person, in all their collections."""
+    return sum(review_counts(sc).values())
 
 
 @router.get('/collections/{ref}/inbox')

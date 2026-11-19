@@ -4,6 +4,7 @@ import { api } from '../api.js'
 import SafeMarkdown from '../components/SafeMarkdown.jsx'
 import { Pill } from '../components/ui.jsx'
 import { UsagePill } from './CollectionsPage.jsx'
+import { rememberCollection } from '../components/collection.js'
 
 function ModelLinks({ d, cid, slug, onChange }) {
   const [adding, setAdding] = useState(false), [ents, setEnts] = useState([]), [pick, setPick] = useState(''), [rel, setRel] = useState('about'), [err, setErr] = useState('')
@@ -39,6 +40,7 @@ export default function TopicPage() {
   const { slug } = useParams()
   const [params] = useSearchParams()
   const cid = params.get('c')
+  useEffect(() => { rememberCollection(cid) }, [cid])
   const nav = useNavigate()
   const [ver, setVer] = useState(null), [d, setD] = useState(null), [err, setErr] = useState(''), [hi, setHi] = useState(null), [merge, setMerge] = useState(false), [all, setAll] = useState([]), [into, setInto] = useState('')
   const reload = () => api.get(`/api/library/collections/${cid}/topics/${slug}${ver ? `?version=${ver}` : ''}`).then(setD).catch((e) => setErr(e.message))

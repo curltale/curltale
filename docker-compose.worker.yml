@@ -4,7 +4,7 @@
 # This turns the web app's own workers off (SERVICE_ROLE=api) and starts one worker container. Scale it with
 #   docker compose -f docker-compose.yml -f docker-compose.worker.yml up -d --scale worker=3
 # The worker needs what the app needs to do the jobs: the same database, the same .env, and the same storage (the ./data folder, or the S3 bucket).
-# If you also use the browser service, run it with both files: -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.fetcher.yml
+# If you also use the browser service or the document converter, add their files: -f docker-compose.fetcher.yml, -f docker-compose.converter.yml
 services:
   app:
     environment:
@@ -20,9 +20,11 @@ services:
       DATABASE_URL: postgresql://studio_app:${APP_DB_PASSWORD}@db:5432/studio
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
     command: ["python", "-m", "studio.worker"]
-    networks: [default, fetch]
+    networks: [default, fetch, convert]
     volumes:
       - ./data:/app/data
 
 networks:
   fetch:
+  convert:
+    internal: true

@@ -45,6 +45,7 @@ export default function SettingsPage() {
             <b>{cur[1]}</b>{table(mine(cur[2]))}
             {tab === 'ai' && <LlmTest />}
             {tab === 'storage' && <StorageTest />}
+            {tab === 'library' && <ConverterTest />}
           </div>)}
         <p className="small muted" style={{ marginTop: 8 }}>The number on a tab is how many of its settings were changed on this page.</p>
       </>}
@@ -69,6 +70,17 @@ function StorageTest() {
     <div className="row" style={{ marginTop: 10 }}>
       <button className="btn small" disabled={busy} onClick={async () => { setBusy(true); setR(null); try { setR(await api.post('/api/admin/storage/test')) } catch (e) { setR({ ok: false, error: e.message }) } setBusy(false) }}>{busy ? 'Testing…' : 'Test the storage'}</button>
       {r && (r.ok ? <Pill tone="ok">{r.detail}</Pill> : <span className="small" style={{ color: 'var(--bad)' }}>failed: {r.error}</span>)}
+      <span className="small muted">Tests the saved values: save first.</span>
+    </div>
+  )
+}
+
+function ConverterTest() {
+  const [r, setR] = useState(null), [busy, setBusy] = useState(false)
+  return (
+    <div className="row" style={{ marginTop: 10 }}>
+      <button className="btn small" disabled={busy} onClick={async () => { setBusy(true); setR(null); try { setR(await api.post('/api/admin/converter/test')) } catch (e) { setR({ ok: false, error: e.message }) } setBusy(false) }}>{busy ? 'Testing…' : 'Test the document converter'}</button>
+      {r && (r.ok ? <Pill tone="ok">{r.detail}</Pill> : <span className="small" style={{ color: 'var(--bad)' }}>{r.error === 'no address set' ? 'not set up (optional)' : `failed: ${r.error}`}</span>)}
       <span className="small muted">Tests the saved values: save first.</span>
     </div>
   )

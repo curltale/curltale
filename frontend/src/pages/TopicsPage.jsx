@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api, q as qs } from '../api.js'
 import { Pill } from '../components/ui.jsx'
 import { UsagePill } from './CollectionsPage.jsx'
+import { useStudio } from '../context.jsx'
 
 function Proposals({ cid, items, onDone }) {
   const [err, setErr] = useState('')
@@ -19,9 +20,10 @@ function Proposals({ cid, items, onDone }) {
 
 export default function TopicsPage() {
   const [params, setParams] = useSearchParams()
-  const [cols, setCols] = useState(null), [data, setData] = useState(null), [vocab, setVocab] = useState(null), [text, setText] = useState(params.get('q') || ''), [err, setErr] = useState('')
+  const [data, setData] = useState(null), [vocab, setVocab] = useState(null), [text, setText] = useState(params.get('q') || ''), [err, setErr] = useState('')
   const cid = params.get('c'), type = params.get('type') || '', query = params.get('q') || ''
-  useEffect(() => { api.get('/api/library/collections').then((d) => { const mine = d.collections.filter((c) => c.level); setCols(mine); if (!cid && mine[0]) setParams({ c: mine[0].id }, { replace: true }) }).catch((e) => setErr(e.message)) }, [])
+  const { collections } = useStudio()                       // the shell's bar chooses the collection; this page reads it
+  const cols = collections ? collections.filter((c) => c.level) : null
   const load = () => cid && api.get(`/api/library/collections/${cid}/topics?${qs({ type, q: query })}`).then((d) => { setData(d); setErr('') }).catch((e) => setErr(e.message))
   useEffect(() => { setData(null); load() }, [cid, type, query])
   const level = cols?.find((c) => c.id === cid)?.level
@@ -32,9 +34,7 @@ export default function TopicsPage() {
     <>
       <div className="row" style={{ marginBottom: 14 }}>
         <div><h1>Topics</h1><div className="muted">What the documents of a collection say, organised by subject, every statement tied to its evidence.</div></div>
-        {cols?.length > 0 && <select className="right" style={{ width: 'auto' }} value={cid || ''} onChange={(e) => setParams({ c: e.target.value })}>{cols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
       </div>
-      {cols && !cols.length && <p className="muted">You have no access to any collection yet.</p>}
       {err && <div className="banner bad">{err}</div>}
       {pending.length > 0 && <Proposals cid={cid} items={pending} onDone={() => { load(); api.get(`/api/library/collections/${cid}/vocabulary`).then(setVocab) }} />}
       {data && <p className="small muted" style={{ marginTop: 0 }}>Collection <b>{cols?.find((c) => c.id === cid)?.name}</b> <UsagePill usage={data.collection.usage} /> · {data.collection.usage_note}</p>}

@@ -25,6 +25,8 @@ class Extracted:
     ocr_pages: int = 0
     local_ocr_pages: int = 0                  # of those, read by local OCR rather than an AI model
     notes: list = field(default_factory=list)
+    figures: list = field(default_factory=list)          # figures.Figure, in the order of the text
+    figure_stats: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -34,6 +36,7 @@ class OcrText:
     label: str = 'OCR'                        # shown after the place: "Page 3 (local OCR)"
     confidence: float | None = None           # 0-100, when the reader gives one
     rejected: bool = False                    # read, but with too little confidence to be used as a source
+    figures: str = ''                         # what the page's pictures, diagrams or stamps show, described by the image model (kept apart from the text)
 
 
 def _ocr_result(got):
@@ -121,16 +124,23 @@ _NOISE_ROLES = {'navigation', 'banner', 'contentinfo', 'complementary', 'search'
 _NOISE_CLASS = re.compile(r'\b(footer|header|topnav|top-nav|navbar|nav-bar|navigation|breadcrumb|cookie|gdpr|consent|copyright|sidebar|side-bar|widget|advertisement|promo|banner|skip-link)\b', re.I)
 
 
-def html_to_text(raw):
+def html_to_text(raw, col=None, base_url=None):
+    """col: a figures.Collector to gather the main content's pictures and inline SVG drawings (base_url resolves the pictures of a captured page)."""
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(raw, 'html.parser')
     title = soup.title.get_text(' ', strip=True) if soup.title else None
-    for n in soup(['script', 'style', 'noscript', 'svg', 'canvas', 'iframe', 'nav', 'footer', 'header', 'aside', 'form']):
+    css = '\n'.join(t.get_text() for t in soup('style')) if col is not None else ''      # read before the styles go: inline drawings use its colours
+    for n in soup(['script', 'style', 'noscript', 'canvas', 'iframe', 'nav', 'footer', 'header', 'aside', 'form'] + ([] if col is not None else ['svg'])):
         n.decompose()
     for n in soup.find_all(True):
         if n.attrs is not None and (n.get('role') in _NOISE_ROLES or _NOISE_CLASS.search(' '.join(n.get('class') or []) + ' ' + (n.get('id') or ''))):
             n.decompose()
     root = soup.find('main') or soup.find(attrs={'role': 'main'}) or soup.find('article') or soup.body or soup
+    if col is not None:
+        from . import figures
+        figures.html_figures(root, col, base_url, css)
+        for n in soup('svg'):                                                         # what is left (outside the main content) is not read
+            n.decompose()
     for tag in root.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):                 # headings become Markdown headings: they steer chunking and citations
         tag.insert_before('\n\n' + '#' * int(tag.name[1]) + ' ')
         tag.append('\n\n')
@@ -172,31 +182,47 @@ def xlsx_to_text(content):
     return normalize('\n'.join(parts)), sheets
 
 
-def docx_to_text(content):
+def docx_to_text(content, col=None):
     _check_zip(content)
     from docx import Document
     doc = Document(io.BytesIO(content))
     title = (doc.core_properties.title or '').strip() or None
     parts = []
-    for item in doc.iter_inner_content():                                 # paragraphs and tables in the order they appear
+    items = list(doc.iter_inner_content())                                # paragraphs and tables in the order they appear
+    for k, item in enumerate(items):
+        figs = ''
+        if col is not None:
+            from . import figures
+            nxt = items[k + 1] if k + 1 < len(items) else None
+            cap = ''
+            if nxt is not None and not hasattr(nxt, 'rows') and nxt.text.strip() and ('caption' in ((nxt.style.name or '') if nxt.style is not None else '').lower() or figures.CAPTION.match(nxt.text)):
+                cap = nxt.text.strip()
+            figs = figures.docx_figures(item._tbl if hasattr(item, 'rows') else item._p, doc.part, col, cap)
         if hasattr(item, 'rows'):
             lines = table_lines([_cells(r) for r in item.rows])
             if lines:
                 parts.append('\n'.join(lines))
+            if figs:
+                parts.append(figs)
             continue
         t = item.text.strip()
-        if not t:
-            continue
-        m = re.match(r'Heading (\d)', item.style.name or '') if item.style is not None else None
-        parts.append(('#' * int(m.group(1)) + ' ' + t) if m else t)
+        if t:
+            m = re.match(r'Heading (\d)', item.style.name or '') if item.style is not None else None
+            parts.append(('#' * int(m.group(1)) + ' ' + t) if m else t)
+        if figs:
+            parts.append(figs)
     return normalize('\n\n'.join(parts)), title
 
 
-def pptx_to_text(content):
+def pptx_to_text(content, col=None, opts=None):
     _check_zip(content)
     from pptx import Presentation
     prs = Presentation(io.BytesIO(content))
     title, parts, slides = None, [], 0
+    if col is not None:                                                   # LibreOffice prints only the slides that are shown: where each one lands
+        shown = [sl._element.get('show') not in ('0', 'false') for sl in prs.slides]
+        col.cache['pdf_page_of_slide'] = {i + 1: sum(shown[:i]) for i in range(len(shown)) if shown[i]}
+        col.cache['shown_slides'] = sum(shown)
     for i, slide in enumerate(prs.slides, 1):
         texts = []
         for sh in slide.shapes:                                           # text boxes and tables in the slide's own order
@@ -208,15 +234,19 @@ def pptx_to_text(content):
             n = slide.notes_slide.notes_text_frame.text.strip()
             if n:
                 texts.append('Notes: ' + n)
-        if not texts:
+        figs = ''
+        if col is not None:
+            from . import figures
+            figs = figures.pptx_slide_figures(slide, i, col, content, opts)
+        if not texts and not figs:
             continue
         slides += 1
-        title = title or texts[0]
-        parts.append(f'Slide {i}\n' + '\n'.join(texts))
+        title = title or (texts[0] if texts else None)
+        parts.append(f'Slide {i}\n' + '\n'.join(texts) + figs)
     return normalize('\n\n'.join(parts)), title, slides
 
 
-def pdf_to_text(content, ocr=None, max_ocr_pages=100):
+def pdf_to_text(content, ocr=None, max_ocr_pages=100, col=None):
     from pypdf import PdfReader
     from pypdf.errors import PdfReadError
     try:
@@ -245,7 +275,17 @@ def pdf_to_text(content, ocr=None, max_ocr_pages=100):
     try:
         for i, t in enumerate(native):
             if len(t) >= 5:
-                parts.append(f'Page {i + 1}\n{t}')
+                figs = ''
+                if col is not None:
+                    from . import figures
+                    if 'pdf' not in col.cache:
+                        import pypdfium2
+                        col.cache['pdf'] = pypdfium2.PdfDocument(content)        # kept open until the figures are drawn (extract closes it)
+                    try:
+                        figs = figures.pdf_page_figures(col.cache['pdf'], i, col)
+                    except Exception:
+                        figs = ''
+                parts.append(f'Page {i + 1}\n{t}' + figs)
             elif i in todo:
                 if pdf is None:
                     import pypdfium2
@@ -257,8 +297,9 @@ def pdf_to_text(content, ocr=None, max_ocr_pages=100):
                     low.append((i + 1, r.confidence or 0))
                     continue
                 text = r.text.strip()
-                if text:
-                    parts.append(f'Page {i + 1} ({r.label})\n{text}')
+                figs = col.add('scan', location=f'Page {i + 1}', description=r.figures) if (col is not None and r.figures) else ''
+                if text or figs:
+                    parts.append(f'Page {i + 1} ({r.label})\n{text}' + figs)
                     done += 1
                     local += r.label != 'OCR'
                 else:
@@ -271,7 +312,7 @@ def pdf_to_text(content, ocr=None, max_ocr_pages=100):
     return normalize('\n\n'.join(parts)), meta_title or None, len(native), done, local, notes + _ocr_notes(local, low)
 
 
-def image_to_text(content, ocr):
+def image_to_text(content, ocr, col=None):
     if not ocr:
         return '', ['an image needs an OCR model (Settings, Alfred and AI) or local OCR'], 0
     from PIL import Image
@@ -286,6 +327,8 @@ def image_to_text(content, ocr):
     if r.rejected:
         return '', _ocr_notes(0, [(None, r.confidence or 0)]), 0
     text = normalize(r.text)
+    if col is not None and r.figures:
+        text = (text + col.add('scan', description=r.figures)).strip()
     local = 1 if text and r.label != 'OCR' else 0
     return text, _ocr_notes(local, []), local
 
@@ -294,31 +337,46 @@ TEXT_SUFFIXES = {'.txt', '.md', '.json', '.xml', '.tsv', '.log'}
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.tif', '.tiff', '.bmp'}
 
 
-def extract(filename, content, ocr=None, max_ocr_pages=100):
-    """-> Extracted. Raises ExtractError with a plain message when the file cannot be read or holds no text."""
+def extract(filename, content, ocr=None, max_ocr_pages=100, figures=None):
+    """-> Extracted. Raises ExtractError with a plain message when the file cannot be read or holds no text.
+    figures: a figures.Options to read the document's figures (pictures, diagrams, charts) into the text; None leaves them out, as before."""
     suffix = Path(filename).suffix.lower()
     res = Extracted('')
-    if suffix in ('.html', '.htm'):
-        res.text, res.title = html_to_text(_decode(content))
-    elif suffix == '.pdf':
-        res.text, res.title, res.pages, res.ocr_pages, res.local_ocr_pages, res.notes = pdf_to_text(content, ocr, max_ocr_pages)
-    elif suffix == '.docx':
-        res.text, res.title = docx_to_text(content)
-    elif suffix == '.pptx':
-        res.text, res.title, res.pages = pptx_to_text(content)
-    elif suffix == '.xlsx':
-        res.text, res.pages = xlsx_to_text(content)
-    elif suffix == '.csv':
-        res.text = csv_to_text(content)
-    elif suffix == '.tsv':
-        res.text = csv_to_text(content, '\t')
-    elif suffix in IMAGE_SUFFIXES:
-        res.text, res.notes, local = image_to_text(content, ocr)
-        res.ocr_pages, res.local_ocr_pages = (1 if res.text else 0), local
-    elif suffix in TEXT_SUFFIXES:
-        res.text = normalize(_decode(content))
-    else:
-        raise ExtractError(f"files of type '{suffix}' are not supported")
+    col = None
+    if figures is not None:
+        from . import figures as F
+        col = F.Collector()
+    try:
+        if suffix in ('.html', '.htm'):
+            res.text, res.title = html_to_text(_decode(content), col, figures.base_url if figures else None)
+        elif suffix == '.pdf':
+            res.text, res.title, res.pages, res.ocr_pages, res.local_ocr_pages, res.notes = pdf_to_text(content, ocr, max_ocr_pages, col)
+        elif suffix == '.docx':
+            res.text, res.title = docx_to_text(content, col)
+        elif suffix == '.pptx':
+            res.text, res.title, res.pages = pptx_to_text(content, col, figures)
+        elif suffix == '.xlsx':
+            res.text, res.pages = xlsx_to_text(content)
+        elif suffix == '.csv':
+            res.text = csv_to_text(content)
+        elif suffix == '.tsv':
+            res.text = csv_to_text(content, '\t')
+        elif suffix in IMAGE_SUFFIXES:
+            res.text, res.notes, local = image_to_text(content, ocr, col)
+            res.ocr_pages, res.local_ocr_pages = (1 if res.text else 0), local
+        elif suffix in TEXT_SUFFIXES:
+            res.text = normalize(_decode(content))
+        else:
+            raise ExtractError(f"files of type '{suffix}' are not supported")
+        if col is not None:
+            figures.title = figures.title or res.title
+            res.text, res.figures, res.figure_stats = F.resolve(res.text, col, figures, res.notes)
+            line = F.summary(res.figure_stats)
+            if line:
+                res.notes.append(line)
+    finally:
+        if col is not None and col.cache.get('pdf') is not None:
+            col.cache['pdf'].close()
     if not res.text.strip():
         raise ExtractError('no readable text was found' + (': ' + '; '.join(res.notes) if res.notes else ''))
     return res

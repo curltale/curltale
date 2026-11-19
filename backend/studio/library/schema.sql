@@ -80,6 +80,29 @@ CREATE TABLE IF NOT EXISTS library.source_text (
   extractor     text,
   FOREIGN KEY (source_id, collection_id) REFERENCES library.source (id, collection_id) ON DELETE CASCADE
 );
+-- the figures of a document (pictures, diagrams, charts) as they were read: the image kept with the source, and what the text says about it
+CREATE TABLE IF NOT EXISTS library.source_figure (
+  id            bigserial PRIMARY KEY,
+  collection_id uuid NOT NULL,
+  source_id     uuid NOT NULL,
+  label         text NOT NULL,                      -- 'Figure 3', 'Chart 1': as the source's text names it
+  kind          text NOT NULL,                      -- image, svg, drawing (a region of a PDF page), slide, chart, scan
+  location      text,                               -- 'Page 4', 'Slide 2'
+  storage_key   text,                               -- the kept image; none for a chart or a scanned page
+  mime          text,
+  sha256        text,
+  width         int,
+  height        int,
+  caption       text NOT NULL DEFAULT '',
+  alt           text NOT NULL DEFAULT '',
+  description   text NOT NULL DEFAULT '',           -- by the AI model, or a chart's values
+  described_by  text,                               -- ai | caption | alt | data | NULL (kept, nothing said about it)
+  same_as       text,                               -- the figure it repeats
+  char_start    int NOT NULL DEFAULT 0,             -- where its block starts in library.source_text
+  UNIQUE (source_id, label),
+  FOREIGN KEY (source_id, collection_id) REFERENCES library.source (id, collection_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS source_figure_source ON library.source_figure (collection_id, source_id);
 -- library.source_chunk is created by vectors.ensure_library_chunks (its vector column depends on the embedding size)
 
 -- what the AI may do with a collection, and whether agents may read it at all

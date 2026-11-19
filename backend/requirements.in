@@ -17,3 +17,4 @@ pypdfium2>=4              # Library: rendering PDF pages for OCR (Apache-2.0 / B
 beautifulsoup4>=4.12
 python-docx>=1.1
 python-pptx>=1.0
+resvg-py>=0.5               # Library: drawing SVG figures (MIT, wraps resvg; no system libraries)

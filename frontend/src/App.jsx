@@ -36,6 +36,7 @@ import GlobalSearch from './components/GlobalSearch.jsx'
 import InterviewsPage from './pages/InterviewsPage.jsx'
 import VocabularyPage from './pages/VocabularyPage.jsx'
 import InterviewPage from './pages/InterviewPage.jsx'
+import { currentCollection, pickCollection, rememberCollection } from './components/collection.js'
 
 function Login({ onLogin }) {
   const [u, setU] = useState('admin'), [p, setP] = useState(''), [err, setErr] = useState('')
@@ -67,6 +68,39 @@ export default function App() {
   const nav = useNavigate()
   const loc = useLocation()
 
+  const [collection, setCollection] = useState(currentCollection)
+  useEffect(() => {                                   // the Review badge counts the collection being worked in, so it follows the person's choice
+    const pick = (e) => setCollection(e.detail || currentCollection())
+    window.addEventListener('studio:collection', pick)
+    return () => window.removeEventListener('studio:collection', pick)
+  }, [])
+  // The collections this person may open, loaded once for the whole Knowledge section and kept fresh after changes (the bar and every page use it)
+  const [collections, setCollections] = useState(null)
+  const libraryOn = !!status?.library
+  const loadCollections = useCallback(() => api.get('/api/library/collections').then((d) => setCollections(d.collections.filter((c) => c.level))).catch(() => {}), [])
+  useEffect(() => {
+    if (!libraryOn) return
+    loadCollections()
+    window.addEventListener('studio:changed', loadCollections)
+    return () => window.removeEventListener('studio:changed', loadCollections)
+  }, [libraryOn])
+  const knowledge = loc.pathname.startsWith('/library/')            // every Knowledge page but Collections, which is the list itself
+  const urlCollection = new URLSearchParams(loc.search).get('c')
+  useEffect(() => {                                                  // a Knowledge page opened without a collection: the remembered one (or the first)
+    if (!knowledge || urlCollection || !collections?.length) return
+    const sp = new URLSearchParams(loc.search); sp.set('c', pickCollection(collections))
+    nav({ pathname: loc.pathname, search: '?' + sp.toString() }, { replace: true })
+  }, [knowledge, urlCollection, collections])
+  useEffect(() => { if (knowledge && urlCollection) rememberCollection(urlCollection) }, [knowledge, urlCollection])
+  const pickInBar = (id) => {                                        // a list page keeps its place; a single item belongs to the old collection: back to its list
+    const section = loc.pathname.split('/').slice(0, 3).join('/')
+    rememberCollection(id)
+    nav(`${section}?c=${id}`)
+  }
+  const shownCollection = urlCollection || (collections?.length ? pickCollection(collections) : collection)   // never blank while the address catches up
+  const withCollection = (to) => shownCollection ? `${to}?c=${shownCollection}` : to                         // menu links carry it: no empty first render
+  const waiting = status?.library_review_by || {}
+  const review = !status ? 0 : collection && status.library_review_by ? (waiting[collection] || 0) : status.library_review
   const refresh = useCallback(() => api.get('/api/status').then(setStatus).catch(() => {}), [])
   useEffect(() => {                                   // keep the counters of the menu true: after any change made here, when the tab is looked at again, and every half minute
     let t
@@ -86,7 +120,7 @@ export default function App() {
   if (!user) return <Login onLogin={setUser} />
   if (user.must_change) return <ChangePassword user={user} forced onDone={() => api.get('/api/me').then(setUser)} />
   const editable = version === 'draft' && !!status?.draft && can(user, 'modeller')
-  const ctx = { user, status, refresh, version, setVersion, editable }
+  const ctx = { user, status, refresh, version, setVersion, editable, collections, collection: urlCollection || collection }
   const onto = ['/', '/entities', '/graph', '/path', '/examples', '/search'].some((p) => (p === '/' ? loc.pathname === '/' : loc.pathname.startsWith(p)))
   const pub = status?.versions?.find((v) => v.status === 'published')
   const empty = !!status && !status.published && version === 'published' && !['/versions', '/settings', '/admin', '/activity', '/library'].some((p) => loc.pathname.startsWith(p))
@@ -109,8 +143,8 @@ export default function App() {
         <nav className="side" aria-label="Main">
           <h4>Ontology</h4>
           <L to="/" end icon="entities">Entities</L><L to="/graph" icon="graph">Graph</L><L to="/path" icon="path">Join paths</L><L to="/examples" icon="examples">Query examples</L><L to="/versions" icon="versions">Changes & versions</L>
-          {status?.library && <><h4>Knowledge</h4><L to="/library" end icon="collections">Collections</L><L to="/library/sources" icon="sources">Sources</L><L to="/library/topics" icon="topics">Topics</L><L to="/library/graph" icon="graph">Graph</L>
-            <L to="/library/review" icon="review" badge={status.library_review > 0 ? status.library_review : null}>Review</L><L to="/library/interview" icon="interview">Interview</L><L to="/library/vocabulary" icon="vocabulary">Vocabulary</L><L to="/library/health" icon="health">Health</L></>}
+          {status?.library && <><h4>Knowledge</h4><L to="/library" end icon="collections">Collections</L><L to={withCollection("/library/sources")} icon="sources">Sources</L><L to={withCollection("/library/topics")} icon="topics">Topics</L><L to={withCollection("/library/graph")} icon="graph">Graph</L>
+            <L to={withCollection("/library/review")} icon="review" badge={review > 0 ? review : null}>Review</L><L to={withCollection("/library/interview")} icon="interview">Interview</L><L to={withCollection("/library/vocabulary")} icon="vocabulary">Vocabulary</L><L to={withCollection("/library/health")} icon="health">Health</L></>}
           <h4>Data</h4>
           <L to="/data" end icon="database">Browse</L><L to="/data/sql" icon="sql">SQL console</L><L to="/data/check" icon="check">Model check</L>
           <h4>Admin</h4>
@@ -124,6 +158,12 @@ export default function App() {
                 <option value="published">Published{pub ? ': ' + pub.label : ''}</option>
                 <option value="draft" disabled={!status?.draft}>{status?.draft ? 'Draft (editing)' : 'No draft'}</option>
               </select></div>}
+            {knowledge && collections?.length > 0 && <div className="row" style={{ marginBottom: 12, justifyContent: 'flex-end' }}><span className="small muted">Collection</span>
+              <select style={{ width: 'auto' }} aria-label="Collection" value={shownCollection || ''} onChange={(e) => pickInBar(e.target.value)}>
+                {!collections.some((c) => c.id === shownCollection) && <option value={shownCollection || ''} disabled>Choose a collection</option>}
+                {collections.map((c) => <option key={c.id} value={c.id}>{c.name}{waiting[c.id] ? ` · ${waiting[c.id]} to review` : ''}</option>)}
+              </select></div>}
+            {knowledge && collections && !collections.length && <div className="banner">You have no access to any collection yet. An admin can give you access on the Collections page.</div>}
             {version === 'draft' && editable && <div className="banner">You are viewing the <b>draft</b>. Changes are not visible to agents until you publish it (Changes & versions).</div>}
             <ErrorBoundary key={loc.pathname}>
             {empty ? <EmptyOntology /> : <Routes>

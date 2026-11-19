@@ -1,5 +1,6 @@
 """Create the synthetic database from the published model, load the generated world, validate it."""
 import hashlib
+import os
 import re
 import time
 import psycopg
@@ -16,7 +17,9 @@ COMBOS = [dict(zip(('confidential', 'personal', 'restricted'), bits)) for bits i
 
 
 def role_name(ent):
-    return 'sd_' + access.role_code(ent)
+    """Login roles belong to the whole PostgreSQL server, not to one database: a test suite run against the same server must not take over the
+    app's roles (and reset their passwords with its own key), so it gets its own prefix (SYNTH_ROLE_PREFIX)."""
+    return os.environ.get('SYNTH_ROLE_PREFIX', 'sd_') + access.role_code(ent)
 
 
 def _url(db):
