@@ -33,7 +33,7 @@ function Row({ s, cid, canWrite, onChange }) {
   return (
     <div style={{ padding: '14px 0', borderTop: '1px solid var(--line)' }}>
       <div className="row" style={{ alignItems: 'baseline' }}>
-        <strong>{s.kind === 'url' ? <a href={s.url} target="_blank" rel="noreferrer noopener">{s.name}</a> : s.name}</strong><span className="muted small">{s.size ? size(s.size) + ' · ' : ''}{s.kind === 'url' ? 'web page · ' : ''}by {s.created_by} · {new Date(s.created_at).toLocaleString()}</span>
+        <strong>{s.kind === 'url' ? <a href={s.url} target="_blank" rel="noreferrer noopener">{s.name}</a> : s.name}</strong><span className="muted small">{s.size ? size(s.size) + ' · ' : ''}{s.kind === 'url' ? 'web page · ' : ''}{replaced(s) ? <span title={`First added ${new Date(s.created_at).toLocaleString()} by ${s.created_by}`}>replaced {new Date(s.version_at).toLocaleString()}{s.stats?.replaced_by ? ` by ${s.stats.replaced_by}` : ''}</span> : <>by {s.created_by} · {new Date(s.created_at).toLocaleString()}</>}</span>
         <span className="right row" style={{ gap: 6 }}>{s.status === 'ready' && s.wiki_status !== 'none' && <Pill tone={(WIKI[s.wiki_status] || [])[1]}>{(WIKI[s.wiki_status] || [s.wiki_status])[0]}</Pill>}<Pill tone={tone}>{label}</Pill></span>
       </div>
       {topicsRunning && <div className="small muted" style={{ marginTop: 4 }}>Building topics from this document… <span className="muted">{s.job.step || (s.job.status === 'queued' ? 'waiting for a worker' : '')}</span></div>}
@@ -74,6 +74,9 @@ function Search({ cid, usage }) {
     </div>
   )
 }
+
+// a source replaced with a new version (or a web page whose content changed) is shown, and sorted, by the date of the version it holds now
+const replaced = (s) => s.version_at && new Date(s.version_at) - new Date(s.created_at) > 60000
 
 export default function SourcesPage() {
   const [params, setParams] = useSearchParams()

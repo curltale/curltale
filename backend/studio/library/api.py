@@ -191,7 +191,7 @@ EXTENSIONS = {'pdf', 'docx', 'pptx', 'xlsx', 'csv', 'tsv', 'txt', 'md', 'html', 
 
 
 def _src(r, st):
-    return {'id': str(r['id']), 'name': r['name'], 'kind': r['kind'], 'url': r['url'], 'size': r['size'], 'status': r['status'], 'title': r['title'], 'stats': r['stats'], 'wiki_status': r['wiki_status'], 'error': r['error'], 'created_by': r['created_by'], 'created_at': r['created_at'],
+    return {'id': str(r['id']), 'name': r['name'], 'kind': r['kind'], 'url': r['url'], 'size': r['size'], 'status': r['status'], 'title': r['title'], 'stats': r['stats'], 'wiki_status': r['wiki_status'], 'error': r['error'], 'created_by': r['created_by'], 'created_at': r['created_at'], 'version_at': r.get('version_at'),
             'job': st.get(str(r['id']))}
 
 
@@ -199,7 +199,7 @@ def _src(r, st):
 def list_sources(ref: str, sc=Depends(scope_of)):
     col = S.open_collection(sc, ref)
     with db.conn() as c:
-        rows = c.execute('SELECT id,name,kind,url,size,status,title,stats,wiki_status,error,created_by,created_at FROM library.source WHERE collection_id=%s ORDER BY created_at DESC LIMIT 500', (col.id,)).fetchall()
+        rows = c.execute('SELECT id,name,kind,url,size,status,title,stats,wiki_status,error,created_by,created_at,version_at FROM library.source WHERE collection_id=%s ORDER BY coalesce(version_at, created_at) DESC LIMIT 500', (col.id,)).fetchall()
     st = jobs.status_of([r['id'] for r in rows])
     return {'collection': {'id': col.id, 'name': col.name, 'usage': col.usage, 'level': col.level, 'allow_ai': col.allow_ai}, 'sources': [_src(r, st) for r in rows]}
 
@@ -279,7 +279,7 @@ def replace_source(ref: str, sid: str, file: UploadFile | None = File(None), u=D
         except Exception:
             pass                                                                # a leftover file is harmless: the source points at the new one
     with db.conn() as c:
-        c.execute("UPDATE library.source SET name=%s, mime=%s, size=%s, sha256=%s, storage_key=%s, status='queued', error=NULL, "
+        c.execute("UPDATE library.source SET name=%s, mime=%s, size=%s, sha256=%s, storage_key=%s, status='queued', error=NULL, version_at=now(), "
                   "stats = stats || %s::jsonb WHERE id=%s", (name, file.content_type, size, digest, key, json.dumps({'replaced_by': u['username']}), src['id']))
     jobs.enqueue('source.ingest', col.id, src['id'], user=u['username'])
     _audit(u['username'], 'replace_source', col.id, before={'source': str(src['id']), 'name': src['name']}, after={'name': name, 'size': size})

@@ -441,9 +441,21 @@ def test_a_replaced_file_updates_its_topics_in_place_and_withdraws_what_it_no_lo
     before = _topics(client, a)
     assert set(before) == {'refund-policy', 'premium-plan'}
     v_before = client.get(f'/api/library/collections/{a}/topics/refund-policy').json()['version']
+    with db.conn() as c:                                                                                       # first added nine days ago
+        c.execute("UPDATE library.source SET created_at = now() - interval '9 days', version_at = now() - interval '9 days' WHERE id=%s", (sid,))
+    import datetime
+    from studio.library import topics as T
+    now = datetime.datetime.now(datetime.timezone.utc)
+    today, first = now.date().isoformat(), (now - datetime.timedelta(days=9)).date().isoformat()
+    assert T.added_dates(a, [sid]) == {sid: first}
     r = _replace(client, a, sid, 'refunds-2026.md', DOC + b' Refunds are paid within five working days.')
     assert r.status_code == 200 and r.json() == {'id': sid, 'name': 'refunds-2026.md', 'status': 'queued'}        # the same source, under its new name
+    assert T.added_dates(a, [sid]) == {sid: today}                                                             # the writers date it by its new version
+    listed = next(x for x in client.get(f'/api/library/collections/{a}/sources').json()['sources'] if x['id'] == sid)
+    assert listed['created_at'][:10] == first and listed['version_at'][:10] == today                          # and it still shows when it was first added
     _run()
+    listed = next(x for x in client.get(f'/api/library/collections/{a}/sources').json()['sources'] if x['id'] == sid)
+    assert listed['stats']['replaced_by'] == 'ann' and listed['stats']['passages'] >= 1                      # reading it again keeps who replaced it
     assert 'Its previous version fed these topics' in seen[1] and '- refund-policy: Refund policy' in seen[1] and '- premium-plan: Premium plan' in seen[1]
     assert 'previous version' not in seen[0]                                                                   # a first upload gets no such list
     after = _topics(client, a)

@@ -177,8 +177,9 @@ def ingest(job, ctx):
                 res.notes.append(f'the source page could not be written: {type(e).__name__}: {str(e)[:200]}')
         stats = {'chars': len(res.text), 'passages': len(parts), 'embedded': embedded, 'pages': res.pages, 'ocr_pages': res.ocr_pages, 'local_ocr_pages': res.local_ocr_pages, 'notes': res.notes,
                  **({'figures': res.figure_stats} if res.figure_stats.get('found') else {})}
+        keep = {k: v for k, v in (src.get('stats') or {}).items() if k in ('replaced_by',)}     # who brought this version: not part of reading it
         with conn() as c:
-            c.execute("UPDATE library.source SET status='ready', error=NULL, title=%s, stats=%s, wiki_status=%s WHERE id=%s", (res.title, J(stats), wiki_status, sid))
+            c.execute("UPDATE library.source SET status='ready', error=NULL, title=%s, stats=%s, wiki_status=%s WHERE id=%s", (res.title, J({**keep, **stats}), wiki_status, sid))
         ctx.progress('done', 100)
         if wiki_status == 'approved':
             topics.queue(col, sid, job['created_by'])
@@ -287,7 +288,7 @@ def fetch_source(job, ctx):
     ctx.progress('storing the page', 10)
     storage.store().put(key, io.BytesIO(got.content))
     with conn() as c:
-        c.execute('UPDATE library.source SET sha256=%s, size=%s, storage_key=%s, title=coalesce(%s,title) WHERE id=%s', (digest, len(got.content), key, got.title, sid))
+        c.execute('UPDATE library.source SET sha256=%s, size=%s, storage_key=%s, title=coalesce(%s,title), version_at=now() WHERE id=%s', (digest, len(got.content), key, got.title, sid))
     ingest(job, ctx)
     if notes:
         with conn() as c:

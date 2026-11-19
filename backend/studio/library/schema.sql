@@ -137,7 +137,14 @@ CREATE TABLE IF NOT EXISTS library.wiki_check (
 );
 CREATE INDEX IF NOT EXISTS wiki_check_source ON library.wiki_check (source_id, version, round);
 
-ALTER TABLE library.source ADD COLUMN IF NOT EXISTS url text;                 -- set for sources captured from a web address
+ALTER TABLE library.source ADD COLUMN IF NOT EXISTS url text;
+-- when the source's current version arrived: the upload, then each Replace or each Refresh that found changed content. The writers date evidence by
+-- it, so a replaced document's statements count as the newest. created_at stays the day the source was first added.
+ALTER TABLE library.source ADD COLUMN IF NOT EXISTS version_at timestamptz;
+UPDATE library.source s SET version_at = greatest(s.created_at, coalesce((SELECT max(w.created_at) FROM library.wiki_version w     -- a source page written
+         WHERE w.source_id = s.id AND w.collection_id = s.collection_id AND w.origin = 'written' AND w.created_at > s.created_at + interval '1 hour'), s.created_at))
+  WHERE s.version_at IS NULL;                                                                                                     -- well after the upload: a new version
+ALTER TABLE library.source ALTER COLUMN version_at SET DEFAULT now();                 -- set for sources captured from a web address
 
 -- ============================================================ topics: the wiki of a collection
 -- The vocabulary (what kinds of topic and relation exist) belongs to the collection, seeded from a starter set; nothing here is shared between collections.

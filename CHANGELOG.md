@@ -2,6 +2,11 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [0.4.3] - 2026-11-19
+
+### Changed
+- **A replaced document is dated by its new version.** *Replace with a new version*, and a *Refresh* that finds a web page changed, now set the source's date to that moment. The Sources list shows it (*replaced 19 Nov 2026, 14:20 by ann*, the first upload in a tooltip) and sorts by it, and the topic writer and the revision pass date the document's evidence by it. A replaced document's statements therefore count as the newest, so they win over what its previous version said instead of being held for review as a disagreement the dates do not settle. Documents replaced before this version are dated by when their new version was written. Reading a document again no longer forgets who replaced it.
+
 ## [0.4.2] - 2026-11-19
 
 ### Fixed

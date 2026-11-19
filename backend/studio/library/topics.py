@@ -121,12 +121,13 @@ class TopicTools:
 
 
 def added_dates(cid, ids):
-    """{source id: the day it was added to the collection} for the given ids (those that exist)."""
+    """{source id: the day its current version was added} for the given ids (those that exist): a document replaced with a new version, or a web page
+    whose content changed at a refresh, is dated by that version, so the writers count what it says now as the newest evidence."""
     ids = sorted({str(i) for i in ids if i})
     if not ids:
         return {}
     with conn() as c:
-        return {str(r['id']): r['created_at'].date().isoformat() for r in c.execute('SELECT id, created_at FROM library.source WHERE collection_id=%s AND id::text = ANY(%s)', (cid, ids)).fetchall()}
+        return {str(r['id']): r['at'].date().isoformat() for r in c.execute('SELECT id, coalesce(version_at, created_at) AS at FROM library.source WHERE collection_id=%s AND id::text = ANY(%s)', (cid, ids)).fetchall()}
 
 
 def cited_dates_block(cid, markdown):
