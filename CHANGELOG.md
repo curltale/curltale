@@ -2,6 +2,11 @@
 
 All notable changes are listed here. The project follows semantic versioning; before 1.0, minor versions may change behaviour.
 
+## [0.4.2] - 2026-11-19
+
+### Fixed
+- **Opening a review item, a source, a topic or an interview no longer crashes the page** (*rememberCollection is not defined*). Since 0.4.0 the app's frame remembers the collection for every Knowledge page, and these pages still called the helper they no longer imported.
+
 ## [0.4.1] - 2026-11-19
 
 ### Changed

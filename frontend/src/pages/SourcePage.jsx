@@ -4,7 +4,6 @@ import SafeMarkdown from '../components/SafeMarkdown.jsx'
 import { api } from '../api.js'
 import { Pill } from '../components/ui.jsx'
 import { UsagePill } from './CollectionsPage.jsx'
-import { rememberCollection } from '../components/collection.js'
 
 export const WIKI = { approved: ['Page approved', 'ok'], needs_review: ['Needs review', 'warn'], skipped: ['No page (AI off)', ''], failed: ['Page failed', 'bad'], none: ['No page yet', ''] }
 const VERDICT = { PASS: ['Passed', 'ok'], FAIL: ['Problems found', 'warn'], ERROR: ['Checker gave no result', 'bad'] }
@@ -42,7 +41,6 @@ export default function SourcePage() {
   const { sid } = useParams()
   const [params] = useSearchParams()
   const cid = params.get('c')
-  useEffect(() => { rememberCollection(cid) }, [cid])
   const [ver, setVer] = useState(null), [d, setD] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(false), [draft, setDraft] = useState(null), [waiting, setWaiting] = useState(false)
   const [figs, setFigs] = useState([])
   const load = () => api.get(`/api/library/collections/${cid}/sources/${sid}/wiki${ver ? `?version=${ver}` : ''}`).then((x) => { setD(x); setErr('') }).catch((e) => setErr(e.message))

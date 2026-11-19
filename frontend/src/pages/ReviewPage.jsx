@@ -84,7 +84,6 @@ export function ConflictPage() {
   const { kid } = useParams()
   const [params] = useSearchParams()
   const cid = params.get('c')
-  useEffect(() => { rememberCollection(cid) }, [cid])
   const [d, setD] = useState(null), [err, setErr] = useState(''), [busy, setBusy] = useState(''), [notice, setNotice] = useState('')
   const url = `/api/library/collections/${cid}/conflicts/${kid}`
   const load = () => api.get(url).then((x) => { setD(x); return x }).catch((e) => setErr(e.message))
